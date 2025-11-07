@@ -19,6 +19,8 @@ on:
       - main
   workflow_dispatch:
 
+# IMPORTANT: Define permissions and concurrency at the workflow level
+# The reusable workflow inherits these settings
 permissions:
   contents: read
   pages: write
@@ -31,6 +33,7 @@ concurrency:
 jobs:
   build-and-deploy:
     uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-build-deploy.yml@main
+    # Pass permissions to the job
     permissions:
       contents: read
       pages: write
@@ -110,6 +113,7 @@ jobs:
 - Both workflows are framework-agnostic and can work with any Vite-based project
 - Use `@main` branch for stable versions, or pin to a specific commit SHA for reproducibility
 - **Important**: Use relative paths without `./` prefix for `artifact-path` (e.g., `'dist'` not `'./dist'`) to ensure proper artifact upload with GitHub Actions
+- **Reusable Workflow Pattern**: The reusable workflow does NOT define its own `permissions` or `concurrency` groups. These must be defined in the calling workflow to avoid deadlock conflicts
 
 ## Troubleshooting
 
@@ -139,7 +143,13 @@ If the GitHub Pages artifact isn't uploading correctly:
 
 ### Common Issues
 
+- **"Deadlock was detected for concurrency group 'pages'"**
+  - This happens when both the calling workflow and reusable workflow define the same concurrency group
+  - **Solution**: Only define `concurrency` in the calling workflow, not in the reusable workflow
+  - The reusable workflow now correctly inherits concurrency settings from the caller
+
 - **404 on deployment**: Check that `index.html` is at the root of the artifact, not in a subdirectory
+
 - **Assets not loading**: Verify your `vite.config.ts` has the correct `base` path
   - User/org pages (`username.github.io`): `base: '/'`
   - Project pages (`username.github.io/repo`): `base: '/repo/'`
