@@ -27,7 +27,7 @@ on:
         description: 'Path to the build output directory'
         required: false
         type: string
-        default: '/dist'
+        default: 'dist'
       run-lint:
         description: 'Whether to run linting'
         required: false
@@ -53,9 +53,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
