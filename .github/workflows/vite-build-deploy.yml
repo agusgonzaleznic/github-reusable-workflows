@@ -54,6 +54,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -72,18 +75,42 @@ jobs:
 
       - name: Verify build output
         run: |
-          echo "Contents of build directory:"
-          ls -la ${{ inputs.artifact-path }}
+          echo "=== Build Output Verification ==="
+          echo "Artifact path input: ${{ inputs.artifact-path }}"
+          echo "Current working directory: $(pwd)"
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
           echo ""
+
+          # Resolve absolute path
+          if [[ "${{ inputs.artifact-path }}" = /* ]]; then
+            ARTIFACT_DIR="${{ inputs.artifact-path }}"
+          else
+            ARTIFACT_DIR="$(pwd)/${{ inputs.artifact-path }}"
+          fi
+          echo "Resolved artifact directory: $ARTIFACT_DIR"
+          echo ""
+
+          echo "Contents of build directory:"
+          ls -laR "$ARTIFACT_DIR"
+          echo ""
+
           echo "Verifying index.html exists:"
-          if [ ! -f "${{ inputs.artifact-path }}/index.html" ]; then
-            echo "ERROR: index.html not found in ${{ inputs.artifact-path }}"
+          if [ ! -f "$ARTIFACT_DIR/index.html" ]; then
+            echo "ERROR: index.html not found in $ARTIFACT_DIR"
             exit 1
           fi
           echo "✓ Build output verified successfully"
+          echo ""
 
-      - name: Upload build artifacts
-        uses: actions/upload-pages-artifact@v3
+          echo "Files that will be uploaded to GitHub Pages:"
+          find "$ARTIFACT_DIR" -type f -exec echo "  {}" \;
+          echo ""
+
+          echo "Total files: $(find "$ARTIFACT_DIR" -type f | wc -l)"
+          echo "Artifact will be uploaded from: ${{ inputs.artifact-path }}"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
         with:
           path: ${{ inputs.artifact-path }}
 
