@@ -60,9 +60,15 @@ jobs:
 
 **Required Repository Settings:**
 
-1. Go to Repository → Settings → Pages
-2. Set Source to "GitHub Actions"
-3. Save changes
+⚠️ **CRITICAL**: Your repository MUST be configured to use GitHub Actions for deployment:
+
+1. Go to **Repository** → **Settings** → **Pages**
+2. Under **"Build and deployment"** section:
+   - **Source** dropdown: Select **"GitHub Actions"**
+   - Do NOT use "Deploy from a branch" (this will use Jekyll and ignore your workflow)
+3. Click **Save**
+
+**Why this matters**: If set to "Deploy from a branch", GitHub will try to build your site with Jekyll from the branch, completely ignoring your pre-built artifact. Your workflow will appear to succeed, but the deployed site will be incorrect or broken.
 
 ---
 
@@ -142,6 +148,15 @@ If the GitHub Pages artifact isn't uploading correctly:
 7. **Review workflow logs**: Look for the "Build Output Verification" section
 
 ### Common Issues
+
+- **"Jekyll is building my site" or "Workflow succeeds but site is broken"**
+  - **Cause**: Repository is set to "Deploy from a branch" instead of "GitHub Actions"
+  - **Solution**:
+    1. Go to Repository → Settings → Pages
+    2. Change Source from "Deploy from a branch" to **"GitHub Actions"**
+    3. Re-run the workflow
+  - **Why**: When set to "Deploy from a branch", GitHub ignores your artifact and tries to build with Jekyll from the branch
+  - **Verification**: Check your workflow logs - if you see Jekyll-related output, your settings are wrong
 
 - **"Deadlock was detected for concurrency group 'pages'"**
   - This happens when both the calling workflow and reusable workflow define the same concurrency group
