@@ -70,6 +70,18 @@ jobs:
       - name: Build project
         run: ${{ inputs.build-command }}
 
+      - name: Verify build output
+        run: |
+          echo "Contents of build directory:"
+          ls -la ${{ inputs.artifact-path }}
+          echo ""
+          echo "Verifying index.html exists:"
+          if [ ! -f "${{ inputs.artifact-path }}/index.html" ]; then
+            echo "ERROR: index.html not found in ${{ inputs.artifact-path }}"
+            exit 1
+          fi
+          echo "✓ Build output verified successfully"
+
       - name: Upload build artifacts
         uses: actions/upload-pages-artifact@v3
         with:
