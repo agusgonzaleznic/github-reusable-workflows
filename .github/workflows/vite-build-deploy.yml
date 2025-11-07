@@ -1,0 +1,90 @@
+name: Build and Deploy Vite App
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '20'
+      build-command:
+        description: 'Command to build the project'
+        required: false
+        type: string
+        default: 'npm run build'
+      install-command:
+        description: 'Command to install dependencies'
+        required: false
+        type: string
+        default: 'npm ci'
+      lint-command:
+        description: 'Command to lint the project'
+        required: false
+        type: string
+        default: 'npm run lint'
+      artifact-path:
+        description: 'Path to the build output directory'
+        required: false
+        type: string
+        default: './dist'
+      run-lint:
+        description: 'Whether to run linting'
+        required: false
+        type: boolean
+        default: true
+
+# Set permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: ${{ inputs.install-command }}
+
+      - name: Run linter
+        if: ${{ inputs.run-lint }}
+        run: ${{ inputs.lint-command }}
+
+      - name: Build project
+        run: ${{ inputs.build-command }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ inputs.artifact-path }}
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

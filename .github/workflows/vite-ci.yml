@@ -1,0 +1,73 @@
+name: CI for Vite App
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '20'
+      build-command:
+        description: 'Command to build the project'
+        required: false
+        type: string
+        default: 'npm run build'
+      install-command:
+        description: 'Command to install dependencies'
+        required: false
+        type: string
+        default: 'npm ci'
+      lint-command:
+        description: 'Command to lint the project'
+        required: false
+        type: string
+        default: 'npm run lint'
+      artifact-path:
+        description: 'Path to the build output directory'
+        required: false
+        type: string
+        default: 'dist'
+      verify-build-output:
+        description: 'Whether to verify build output exists'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  test:
+    name: Lint and Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: ${{ inputs.install-command }}
+
+      - name: Run linter
+        run: ${{ inputs.lint-command }}
+
+      - name: Build project
+        run: ${{ inputs.build-command }}
+
+      - name: Verify build output
+        if: ${{ inputs.verify-build-output }}
+        run: |
+          if [ ! -d "${{ inputs.artifact-path }}" ]; then
+            echo "Error: ${{ inputs.artifact-path }} directory not found"
+            exit 1
+          fi
+          if [ ! -f "${{ inputs.artifact-path }}/index.html" ]; then
+            echo "Error: ${{ inputs.artifact-path }}/index.html not found"
+            exit 1
+          fi
+          echo "Build verification successful!"
+          echo "Build output directory exists and contains index.html"
