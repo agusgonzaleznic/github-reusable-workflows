@@ -33,6 +33,10 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      build-env-vars:
+        description: 'Environment variables to set during build (multiline format: KEY=value)'
+        required: false
 
 jobs:
   build:
@@ -55,6 +59,12 @@ jobs:
       - name: Run linter
         if: ${{ inputs.run-lint }}
         run: ${{ inputs.lint-command }}
+
+      - name: Set up build environment variables
+        if: ${{ secrets.build-env-vars != '' }}
+        run: |
+          echo "Setting up build environment variables..."
+          echo "${{ secrets.build-env-vars }}" >> $GITHUB_ENV
 
       - name: Build project
         run: ${{ inputs.build-command }}
