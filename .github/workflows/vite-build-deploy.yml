@@ -61,10 +61,13 @@ jobs:
         run: ${{ inputs.lint-command }}
 
       - name: Set up build environment variables
-        if: ${{ secrets.build-env-vars != '' }}
         run: |
-          echo "Setting up build environment variables..."
-          echo "${{ secrets.build-env-vars }}" >> $GITHUB_ENV
+          if [ -n "$BUILD_ENV_VARS" ]; then
+            echo "Setting up build environment variables..."
+            echo "$BUILD_ENV_VARS" >> $GITHUB_ENV
+          fi
+        env:
+          BUILD_ENV_VARS: ${{ secrets.build-env-vars }}
 
       - name: Build project
         run: ${{ inputs.build-command }}
