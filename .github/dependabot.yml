@@ -1,0 +1,13 @@
+# Keeps SHA-pinned GitHub Actions current. Without this, pinned SHAs fall
+# behind upstream security patches. Dependabot opens PRs that bump the SHA and
+# update the version comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

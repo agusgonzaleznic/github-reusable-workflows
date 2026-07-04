@@ -32,7 +32,10 @@ concurrency:
 
 jobs:
   build-and-deploy:
-    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-build-deploy.yml@main
+    # SECURITY: pin to a full commit SHA, not @main (see "Supply chain hardening" below).
+    # Resolve the SHA for a release with:
+    #   gh api repos/agusgonzaleznic/github-reusable-workflows/commits/v1.0.0 --jq .sha
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-build-deploy.yml@<full-commit-sha>  # v1.0.0
     # Pass permissions to the job
     permissions:
       contents: read
@@ -89,7 +92,10 @@ on:
 
 jobs:
   ci:
-    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@main
+    # SECURITY: pin to a full commit SHA, not @main (see "Supply chain hardening" below).
+    # Resolve the SHA for a release with:
+    #   gh api repos/agusgonzaleznic/github-reusable-workflows/commits/v1.0.0 --jq .sha
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@<full-commit-sha>  # v1.0.0
     with:
       node-version: '20'              # Optional, default: '20'
       install-command: 'npm ci'       # Optional, default: 'npm ci'
@@ -117,9 +123,51 @@ jobs:
 - All workflows use npm by default, but can be customized via inputs
 - Workflows support Node.js caching for faster builds
 - Both workflows are framework-agnostic and can work with any Vite-based project
-- Use `@main` branch for stable versions, or pin to a specific commit SHA for reproducibility
+- **Security**: pin the reusable workflow to a full commit SHA, never `@main` (see [Supply chain hardening](#supply-chain-hardening))
 - **Important**: Use relative paths without `./` prefix for `artifact-path` (e.g., `'dist'` not `'./dist'`) to ensure proper artifact upload with GitHub Actions
-- **Reusable Workflow Pattern**: The reusable workflow does NOT define its own `permissions` or `concurrency` groups. These must be defined in the calling workflow to avoid deadlock conflicts
+- **Reusable Workflow Pattern**: The reusable workflows do NOT define their own `concurrency` groups — those must be defined in the calling workflow to avoid deadlock conflicts. They DO declare minimal least-privilege `permissions` per job; the caller must grant at least those scopes.
+
+## Supply chain hardening
+
+These workflows follow GitHub Actions supply-chain best practices:
+
+- **All actions are pinned to full commit SHAs** (with the version in a comment), not mutable tags. A mutable tag such as `@v6` can be silently repointed by anyone who compromises the action's repository — as happened in the `tj-actions/changed-files` incident (March 2025). A commit SHA is immutable.
+- **Least-privilege `GITHUB_TOKEN`**: each job declares the minimum `permissions` it needs (`contents: read` to build; `pages: write` + `id-token: write` only on the deploy job).
+- **`persist-credentials: false`** on checkout so the token is not written to `.git/config`, where a malicious dependency in a later step could read it.
+- **Data inputs are passed via `env:` and quoted**: values used as *data* in `run:` blocks (e.g. `artifact-path`) go through `env:` rather than being interpolated directly, removing that shell-injection class.
+- **Dependabot** (`.github/dependabot.yml`) opens weekly PRs to bump the pinned SHAs when upstream ships patches.
+
+### Caller responsibilities
+
+The `install-command`, `lint-command`, and `build-command` inputs are **executed as shell commands** (`run: ${{ inputs.*-command }}`) — that is their purpose. They cannot be `env:`-quoted without breaking that contract. **Do not wire untrusted or event-derived data** (e.g. a PR title, branch name, or `github.event.*`) into these inputs, or into the calling workflow that forwards them — doing so is command injection inside the reusable workflow. Pass only static, trusted command strings.
+
+The `build-env-vars` secret is appended verbatim to `$GITHUB_ENV` and is available to every later step (including dependency build code). GitHub masks the exact full secret string in logs, but **not** each individual `KEY=value` line within a multiline secret — avoid `echo`-ing those values in your build.
+
+### Maintainer controls (root of trust)
+
+Consumers pin to commit SHAs of *this* repository, so this repo's integrity is the root of their trust. Pair SHA pinning with:
+
+- **Branch protection** on `main`: require a PR, a CODEOWNER approval (see `.github/CODEOWNERS`), and passing status checks before merge.
+- **Tag protection** (or immutable releases) so a published version tag can't be silently repointed.
+- Reviewing Dependabot PRs before merge rather than auto-merging.
+
+### Consumers must pin this repo too
+
+Pinning the actions *inside* these workflows only protects half the chain. Any workflow that *calls* these reusable workflows must itself pin to a **full commit SHA** of this repository — referencing `@main` means a compromise of this repo would immediately execute in the caller with the caller's secrets.
+
+```yaml
+# ❌ Not safe — tracks a mutable branch
+uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@main
+
+# ✅ Safe — immutable commit, human-readable version in the comment
+uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@<full-commit-sha>  # v1.0.0
+```
+
+Resolve the SHA for a release tag with:
+
+```bash
+gh api repos/agusgonzaleznic/github-reusable-workflows/commits/v1.0.0 --jq .sha
+```
 
 ## Troubleshooting
 

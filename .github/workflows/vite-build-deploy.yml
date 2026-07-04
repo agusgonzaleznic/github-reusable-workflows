@@ -38,17 +38,29 @@ on:
         description: 'Environment variables to set during build (multiline format: KEY=value)'
         required: false
 
+# Default least-privilege floor for the whole workflow; each job widens only
+# what it needs (bounded by what the caller grants). A future job added without
+# its own permissions block inherits this read-only floor, not the caller's full grant.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
 
+    # The build job only reads the repo and uploads the Pages artifact.
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
@@ -64,7 +76,7 @@ jobs:
         run: |
           if [ -n "$BUILD_ENV_VARS" ]; then
             echo "Setting up build environment variables..."
-            echo "$BUILD_ENV_VARS" >> $GITHUB_ENV
+            echo "$BUILD_ENV_VARS" >> "$GITHUB_ENV"
           fi
         env:
           BUILD_ENV_VARS: ${{ secrets.build-env-vars }}
@@ -73,18 +85,20 @@ jobs:
         run: ${{ inputs.build-command }}
 
       - name: Verify build output
+        env:
+          ARTIFACT_PATH: ${{ inputs.artifact-path }}
         run: |
           echo "=== Build Output Verification ==="
-          echo "Artifact path input: ${{ inputs.artifact-path }}"
+          echo "Artifact path input: $ARTIFACT_PATH"
           echo "Current working directory: $(pwd)"
           echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
           echo ""
 
           # Resolve absolute path
-          if [[ "${{ inputs.artifact-path }}" = /* ]]; then
-            ARTIFACT_DIR="${{ inputs.artifact-path }}"
+          if [[ "$ARTIFACT_PATH" = /* ]]; then
+            ARTIFACT_DIR="$ARTIFACT_PATH"
           else
-            ARTIFACT_DIR="$(pwd)/${{ inputs.artifact-path }}"
+            ARTIFACT_DIR="$(pwd)/$ARTIFACT_PATH"
           fi
           echo "Resolved artifact directory: $ARTIFACT_DIR"
           echo ""
@@ -106,10 +120,10 @@ jobs:
           echo ""
 
           echo "Total files: $(find "$ARTIFACT_DIR" -type f | wc -l)"
-          echo "Artifact will be uploaded from: ${{ inputs.artifact-path }}"
+          echo "Artifact will be uploaded from: $ARTIFACT_PATH"
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
           path: ${{ inputs.artifact-path }}
 
@@ -118,6 +132,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
 
+    # The deploy job needs only the scopes required to publish to Pages via OIDC.
+    permissions:
+      pages: write
+      id-token: write
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -125,7 +144,7 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0
 
       - name: Deployment complete
         run: |
