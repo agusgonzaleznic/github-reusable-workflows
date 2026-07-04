@@ -1,1 +1,5 @@
-@agusgonzaleznic
+# Every change to this repo requires review from the owner. Because consumers
+# pin to commit SHAs of this repo, its integrity is the root of their trust —
+# keep this paired with branch protection (require PR review + CODEOWNER
+# approval) on the default branch.
+* @agusgonzaleznic
