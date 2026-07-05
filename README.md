@@ -42,7 +42,7 @@ jobs:
       pages: write
       id-token: write
     with:
-      node-version: '20'              # Optional, default: '20'
+      node-version: '22'              # Optional, default: '22'
       install-command: 'npm ci'       # Optional, default: 'npm ci'
       lint-command: 'npm run lint'    # Optional, default: 'npm run lint'
       build-command: 'npm run build'  # Optional, default: 'npm run build'
@@ -54,7 +54,7 @@ jobs:
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `node-version` | Node.js version to use | No | `'20'` |
+| `node-version` | Node.js version to use | No | `'22'` |
 | `install-command` | Command to install dependencies | No | `'npm ci'` |
 | `lint-command` | Command to lint the project | No | `'npm run lint'` |
 | `build-command` | Command to build the project | No | `'npm run build'` |
@@ -97,7 +97,7 @@ jobs:
     #   gh api repos/agusgonzaleznic/github-reusable-workflows/commits/v1.0.0 --jq .sha
     uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@<full-commit-sha>  # v1.0.0
     with:
-      node-version: '20'              # Optional, default: '20'
+      node-version: '22'              # Optional, default: '22'
       install-command: 'npm ci'       # Optional, default: 'npm ci'
       lint-command: 'npm run lint'    # Optional, default: 'npm run lint'
       build-command: 'npm run build'  # Optional, default: 'npm run build'
@@ -109,7 +109,7 @@ jobs:
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `node-version` | Node.js version to use | No | `'20'` |
+| `node-version` | Node.js version to use | No | `'22'` |
 | `install-command` | Command to install dependencies | No | `'npm ci'` |
 | `lint-command` | Command to lint the project | No | `'npm run lint'` |
 | `build-command` | Command to build the project | No | `'npm run build'` |
