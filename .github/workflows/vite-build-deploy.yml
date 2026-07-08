@@ -76,6 +76,24 @@ jobs:
         run: |
           if [ -n "$BUILD_ENV_VARS" ]; then
             echo "Setting up build environment variables..."
+            # Register each VALUE as a mask BEFORE promoting it to $GITHUB_ENV.
+            # GitHub only masks the whole multiline `build-env-vars` secret, not
+            # its individual lines; once each KEY=VALUE becomes a job-wide env
+            # var, GitHub echoes the env context at the start of every later
+            # step, which would print each value verbatim in the (public) log.
+            # ::add-mask:: registers each value so it is redacted everywhere.
+            # Skip short/non-secret values (e.g. numeric flags like FOO=1) so we
+            # don't mask common tokens like "1" across the whole log.
+            while IFS= read -r line; do
+              case "$line" in
+                ''|\#*|*=) continue ;;
+                *=*) value="${line#*=}" ;;
+                *) continue ;;
+              esac
+              if [ "${#value}" -ge 8 ]; then
+                echo "::add-mask::$value"
+              fi
+            done <<< "$BUILD_ENV_VARS"
             echo "$BUILD_ENV_VARS" >> "$GITHUB_ENV"
           fi
         env:
