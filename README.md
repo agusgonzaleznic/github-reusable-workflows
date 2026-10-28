@@ -118,11 +118,86 @@ jobs:
 
 ---
 
+### 3. Python Build (`python-build.yml`)
+
+Builds the sdist and wheel of a Python project with uv and uploads them as one artifact, ready for a
+publish job in the calling workflow. On a tag (a release) it fails when the built version differs
+from the tag (`v1.2.3` or `1.2.3`).
+
+The upload to PyPI cannot live in this repository: PyPI's Trusted Publishing only trusts a job
+defined in the workflow file registered on PyPI, and a job from another repository's reusable
+workflow never matches it ([pypi/warehouse#11096](https://github.com/pypi/warehouse/issues/11096)).
+So the caller keeps one short publish job, and no PyPI token exists anywhere.
+
+**Usage** (`.github/workflows/publish.yml` in the package's repository):
+
+```yaml
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/python-build.yml@<full-commit-sha>  # v1.4.0
+    permissions:
+      contents: read
+    with:
+      build-constraints: requirements/build.txt  # Optional, default: '' (no lock)
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/<name>/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write  # Trusted Publishing, nothing else
+    steps:
+      - uses: actions/download-artifact@<full-commit-sha>  # v8.0.2
+        with:
+          name: python-dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@<full-commit-sha>  # v1.14.3
+```
+
+**Inputs:**
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `python-version` | Python version uv builds with | No | `'3.13'` |
+| `uv-version` | uv version to install (setup-uv verifies its checksum) | No | `'0.13.4'` |
+| `build-constraints` | Hash-locked constraints file for the build backend, relative to the repo root | No | `''` |
+| `artifact-name` | Name of the artifact that holds `dist/` | No | `'python-dist'` |
+
+**Outputs:** `version`, the version that was built.
+
+**On PyPI:** the project's Publishing settings need a GitHub publisher with the owner, the
+repository, the caller's workflow file name (`publish.yml` above, never `python-build.yml`) and the
+environment (`pypi`). On GitHub, an environment of that name limited to `v*` tags keeps any other
+ref from publishing.
+
+**Lock the build backend:** `uv build` fetches the project's build backend (for example hatchling)
+from PyPI at build time. A constraints file compiled with hashes pins it:
+
+```bash
+uv pip compile requirements/build.in --universal --generate-hashes -o requirements/build.txt
+```
+
+---
+
 ## General Notes
 
-- All workflows use npm by default, but can be customized via inputs
-- Workflows support Node.js caching for faster builds
-- Both workflows are framework-agnostic and can work with any Vite-based project
+- The Vite workflows use npm by default, but can be customized via inputs
+- The Vite workflows support Node.js caching for faster builds
+- Both Vite workflows are framework-agnostic and can work with any Vite-based project
 - **Security**: pin the reusable workflow to a full commit SHA, never `@main` (see [Supply chain hardening](#supply-chain-hardening))
 - **Important**: Use relative paths without `./` prefix for `artifact-path` (e.g., `'dist'` not `'./dist'`) to ensure proper artifact upload with GitHub Actions
 - **Reusable Workflow Pattern**: The reusable workflows do NOT define their own `concurrency` groups — those must be defined in the calling workflow to avoid deadlock conflicts. They DO declare minimal least-privilege `permissions` per job; the caller must grant at least those scopes.
