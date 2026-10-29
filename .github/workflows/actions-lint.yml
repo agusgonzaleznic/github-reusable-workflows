@@ -1,0 +1,189 @@
+name: Lint Workflows and Action Pins
+
+# Lints a repository's workflows with actionlint and proves its action pins: every `uses:` must
+# name a full commit SHA with a "# vX.Y.Z" comment, and that tag must resolve to exactly that
+# commit in the action's own repository. One implementation for every caller, this repository
+# included (its lint.yml calls this file).
+#
+# The command inputs are executed as given: pass only static strings, never event data.
+on:
+  workflow_call:
+    inputs:
+      actionlint-files:
+        description: 'Space-separated files or globs for actionlint; each must match at least one file'
+        required: false
+        type: string
+        default: '.github/workflows/*.yml'
+      pin-paths:
+        description: 'Space-separated files or folders whose action pins are verified'
+        required: false
+        type: string
+        default: '.github/workflows'
+      prepare-command:
+        description: 'Shell command run before actionlint, for example to render workflow templates'
+        required: false
+        type: string
+        default: ''
+      extra-pin-command:
+        description: 'Shell command run after the pin check, with GH_TOKEN set'
+        required: false
+        type: string
+        default: ''
+      runs-on:
+        description: 'Runner label for both jobs'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+# Least-privilege token: this workflow only reads the repo and the GitHub API.
+permissions:
+  contents: read
+
+jobs:
+  # The job names are half of the callers' required checks ("Lint / actionlint"): renaming one
+  # is a breaking change.
+  actionlint:
+    name: actionlint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      # sha256 of actionlint_1.7.12_linux_amd64.tar.gz, from the release's checksums file
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --max-time 120 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -version
+
+      - name: Prepare
+        if: inputs.prepare-command != ''
+        env:
+          PREPARE_COMMAND: ${{ inputs.prepare-command }}
+        run: bash -euo pipefail -c "$PREPARE_COMMAND"
+
+      - name: Lint the workflows
+        env:
+          ACTIONLINT_FILES: ${{ inputs.actionlint-files }}
+        run: |
+          set -euo pipefail
+          read -r -a patterns <<<"$ACTIONLINT_FILES"
+          files=()
+          for pattern in "${patterns[@]}"; do
+            matched=$(compgen -G "$pattern") || { echo "FAIL no file matches '$pattern'"; exit 1; }
+            while IFS= read -r f; do files+=("$f"); done <<<"$matched"
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "FAIL actionlint-files is empty"
+            exit 1
+          fi
+          "$RUNNER_TEMP/actionlint" -color "${files[@]}"
+
+  pins:
+    name: Verify action pins
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fails on an unpinned reference, a missing comment, an unknown tag or a mismatch, and also
+      # when it finds no references at all, so an empty or misread path cannot pass. Local refs
+      # (./...) and docker:// images are skipped.
+      - name: Check every action is pinned to the commit its version comment names
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIN_PATHS: ${{ inputs.pin-paths }}
+        run: |
+          set -euo pipefail
+          read -r -a paths <<<"$PIN_PATHS"
+          if [ "${#paths[@]}" -eq 0 ]; then
+            echo "FAIL pin-paths is empty"
+            exit 1
+          fi
+          for p in "${paths[@]}"; do
+            [ -e "$p" ] || { echo "FAIL pin path '$p' does not exist"; exit 1; }
+          done
+          fail=0
+          checked=0
+          tab=$(printf '\t')
+
+          # Print the commit a tag points to, dereferencing annotated tags.
+          resolve_tag() {
+            local repo=$1 tag=$2 out type sha
+            out=$(gh api "repos/$repo/git/ref/tags/$tag" --jq '[.object.type, .object.sha] | @tsv') || return 1
+            type=${out%%"$tab"*}
+            sha=${out##*"$tab"}
+            while [ "$type" = tag ]; do
+              out=$(gh api "repos/$repo/git/tags/$sha" --jq '[.object.type, .object.sha] | @tsv') || return 1
+              type=${out%%"$tab"*}
+              sha=${out##*"$tab"}
+            done
+            printf '%s\n' "$sha"
+          }
+
+          re='uses:[[:space:]]*([^[:space:]@#]+)@([^[:space:]#]+)[[:space:]]*(#[[:space:]]*([^[:space:]]+))?'
+
+          while IFS= read -r hit; do
+            file=${hit%%:*}
+            rest=${hit#*:}
+            line=${rest%%:*}
+            text=${rest#*:}
+            [[ $text =~ $re ]] || continue
+            action=${BASH_REMATCH[1]}
+            ref=${BASH_REMATCH[2]}
+            tag=${BASH_REMATCH[4]:-}
+            case $action in ./* | docker://*) continue ;; esac
+            repo=$(cut -d/ -f1-2 <<<"$action")
+            where="$file:$line $action"
+            checked=$((checked + 1))
+            if ! [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+              echo "FAIL $where: ref '$ref' is not a full commit SHA"
+              fail=1
+              continue
+            fi
+            if [ -z "$tag" ]; then
+              echo "FAIL $where: no version comment after the SHA"
+              fail=1
+              continue
+            fi
+            if ! want=$(resolve_tag "$repo" "$tag"); then
+              echo "FAIL $where: tag $tag not found in $repo"
+              fail=1
+              continue
+            fi
+            if [ "$want" != "$ref" ]; then
+              echo "FAIL $where: $tag is $want, but the pin is $ref"
+              fail=1
+              continue
+            fi
+            echo "ok   $where $tag = $ref"
+          done < <(grep -rn -E '^[[:space:]]*-?[[:space:]]*uses:' "${paths[@]}")
+
+          echo "checked $checked pinned action reference(s) in ${paths[*]}"
+          if [ "$checked" -eq 0 ]; then
+            echo "FAIL no action references found in ${paths[*]}"
+            exit 1
+          fi
+          exit "$fail"
+
+      - name: Extra pin check
+        if: inputs.extra-pin-command != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXTRA_PIN_COMMAND: ${{ inputs.extra-pin-command }}
+        run: bash -euo pipefail -c "$EXTRA_PIN_COMMAND"
