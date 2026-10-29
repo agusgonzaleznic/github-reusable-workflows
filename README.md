@@ -198,6 +198,85 @@ The `uv-version` and `python-version` defaults change only by hand here; Dependa
 
 ---
 
+### 4. Lint Workflows and Action Pins (`actions-lint.yml`)
+
+Lints the caller's workflows with actionlint 1.7.12 (checksum-verified) and proves every action pin:
+a full commit SHA, a `# vX.Y.Z` comment, and that tag resolving to exactly that commit upstream. A
+pattern or path that matches nothing fails, so a typo cannot pass. This repository's own `lint.yml`
+calls it too.
+
+**Usage:**
+
+```yaml
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint  # its checks: "Lint / actionlint", "Lint / Verify action pins"
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/actions-lint.yml@<full-commit-sha>  # v1.5.0
+    with:
+      pin-paths: .github/workflows action.yml  # Optional, default: .github/workflows
+```
+
+**Inputs:**
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `actionlint-files` | Space-separated files or globs for actionlint; each must match a file | No | `'.github/workflows/*.yml'` |
+| `pin-paths` | Space-separated files or folders whose pins are verified; each must exist | No | `'.github/workflows'` |
+| `prepare-command` | Shell command run before actionlint, for example rendering workflow templates | No | `''` |
+| `extra-pin-command` | Shell command run after the pin check, with `GH_TOKEN` set | No | `''` |
+| `runs-on` | Runner label | No | `'ubuntu-latest'` |
+
+---
+
+### 5. Python Tests (`python-tests.yml`)
+
+Runs a Python project's tests once per Python version, in a fresh venv that installs only
+hash-locked requirements (`pip install --require-hashes --no-deps --only-binary :all:`).
+
+**Usage:**
+
+```yaml
+jobs:
+  tests:
+    name: Tests  # its checks: "Tests / Python 3.12", "Tests / Python 3.13"
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/python-tests.yml@<full-commit-sha>  # v1.5.0
+    with:
+      requirements: requirements/lock.txt requirements/test.txt
+      apt-packages: ghostscript  # Optional
+      pythonpath: src            # Optional
+```
+
+**Inputs:**
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `python-versions` | JSON list of Python versions, one job each | No | `'["3.12", "3.13"]'` |
+| `requirements` | Space-separated hash-locked requirement files | No | `'requirements.txt'` |
+| `apt-packages` | Space-separated apt packages the tests need | No | `''` |
+| `pythonpath` | `PYTHONPATH` for the test command | No | `''` |
+| `test-command` | Command that runs the tests | No | `'.venv/bin/python -m pytest -q'` |
+| `runs-on` | Runner label | No | `'ubuntu-latest'` |
+
+**Required checks:** GitHub names a check from a reusable workflow `<calling job name> / <job name>`,
+so a ruleset requires, for example, `Tests / Python 3.12`. The job names here are part of every
+caller's contract.
+
+---
+
 ## General Notes
 
 - The Vite workflows use npm by default, but can be customized via inputs
@@ -219,7 +298,8 @@ These workflows follow GitHub Actions supply-chain best practices:
 
 ### Caller responsibilities
 
-The `install-command`, `lint-command`, and `build-command` inputs are **executed as shell commands** (`run: ${{ inputs.*-command }}`) — that is their purpose. They cannot be `env:`-quoted without breaking that contract. **Do not wire untrusted or event-derived data** (e.g. a PR title, branch name, or `github.event.*`) into these inputs, or into the calling workflow that forwards them — doing so is command injection inside the reusable workflow. Pass only static, trusted command strings.
+The `install-command`, `lint-command`, and `build-command` inputs are **executed as shell commands** (`run: ${{ inputs.*-command }}`) — that is their purpose. They cannot be `env:`-quoted without breaking that contract. **Do not wire untrusted or event-derived data** (e.g. a PR title, branch name, or `github.event.*`) into these inputs, or into the calling workflow that forwards them — doing so is command injection inside the reusable workflow. Pass only static, trusted command strings. The same holds for `prepare-command`,
+`extra-pin-command` (actions-lint.yml) and `test-command` (python-tests.yml).
 
 The `build-env-vars` secret is appended verbatim to `$GITHUB_ENV` and is available to every later step (including dependency build code). GitHub masks the exact full secret string in logs, but **not** each individual `KEY=value` line within a multiline secret — avoid `echo`-ing those values in your build.
 
@@ -304,3 +384,5 @@ When adding new reusable workflows, ensure:
 2. Provide sensible default values for all inputs
 3. Document all inputs and outputs
 4. Include usage examples in this README
+5. Never rename a job: its name is half of every caller's required checks (`<calling job> / <job>`)
+6. Leave `concurrency` to the caller; a reusable workflow that sets it can deadlock (see Troubleshooting)

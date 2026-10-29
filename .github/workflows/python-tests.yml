@@ -1,0 +1,97 @@
+name: Python Tests
+
+# Runs a Python project's tests on each Python version in a matrix, in a fresh venv that installs
+# only hash-locked requirements (pip --require-hashes --no-deps --only-binary :all:).
+#
+# test-command is executed as given: pass only static strings, never event data.
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: 'JSON list of Python versions, one job each'
+        required: false
+        type: string
+        default: '["3.12", "3.13"]'
+      requirements:
+        description: 'Space-separated hash-locked requirement files, relative to the repo root'
+        required: false
+        type: string
+        default: 'requirements.txt'
+      apt-packages:
+        description: 'Space-separated apt packages the tests need'
+        required: false
+        type: string
+        default: ''
+      pythonpath:
+        description: 'PYTHONPATH for the test command, for example src'
+        required: false
+        type: string
+        default: ''
+      test-command:
+        description: 'Command that runs the tests'
+        required: false
+        type: string
+        default: '.venv/bin/python -m pytest -q'
+      runs-on:
+        description: 'Runner label for the test jobs'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+# Least-privilege token: this workflow only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  # The job name is half of the callers' required checks ("Tests / Python 3.12"): renaming it
+  # is a breaking change.
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(inputs.python-versions) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install system packages
+        if: inputs.apt-packages != ''
+        env:
+          APT_PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          set -euo pipefail
+          read -r -a packages <<<"$APT_PACKAGES"
+          sudo timeout 300 apt-get update
+          sudo timeout 300 apt-get install -y --no-install-recommends "${packages[@]}"
+
+      - name: Install the hash-locked requirements
+        env:
+          REQUIREMENTS: ${{ inputs.requirements }}
+        run: |
+          set -euo pipefail
+          read -r -a files <<<"$REQUIREMENTS"
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "FAIL requirements is empty"
+            exit 1
+          fi
+          args=()
+          for f in "${files[@]}"; do args+=(-r "$f"); done
+          python -m venv .venv
+          .venv/bin/pip install --quiet --require-hashes --no-deps --only-binary :all: "${args[@]}"
+
+      - name: Run the tests
+        env:
+          PYTHONPATH: ${{ inputs.pythonpath }}
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: bash -euo pipefail -c "$TEST_COMMAND"
