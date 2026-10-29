@@ -127,7 +127,7 @@ from the tag (`v1.2.3` or `1.2.3`).
 The upload to PyPI cannot live in this repository: PyPI's Trusted Publishing only trusts a job
 defined in the workflow file registered on PyPI, and a job from another repository's reusable
 workflow never matches it ([pypi/warehouse#11096](https://github.com/pypi/warehouse/issues/11096)).
-So the caller keeps one short publish job, and no PyPI token exists anywhere.
+So the caller keeps one short publish job, and the workflow needs no PyPI token.
 
 **Usage** (`.github/workflows/publish.yml` in the package's repository):
 
@@ -185,11 +185,16 @@ environment (`pypi`). On GitHub, an environment of that name limited to `v*` tag
 ref from publishing.
 
 **Lock the build backend:** `uv build` fetches the project's build backend (for example hatchling)
-from PyPI at build time. A constraints file compiled with hashes pins it:
+from PyPI at build time. A constraints file compiled with hashes pins it. `build.in` lists the
+project's `[build-system] requires`; compile it for the oldest Python the project supports, and
+leave out releases younger than a week, as the Dependabot cooldown does for actions:
 
 ```bash
-uv pip compile requirements/build.in --universal --generate-hashes -o requirements/build.txt
+uv pip compile requirements/build.in --universal --generate-hashes --python-version 3.12 \
+  --exclude-newer <the date a week ago> -o requirements/build.txt
 ```
+
+The `uv-version` and `python-version` defaults change only by hand here; Dependabot does not see them.
 
 ---
 

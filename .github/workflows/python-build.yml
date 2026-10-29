@@ -81,7 +81,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version=$(python3 - <<'EOF'
+          version=$(python3 -I - <<'EOF'
           import email.parser, glob, sys, zipfile
           wheels, sdists = glob.glob("dist/*.whl"), glob.glob("dist/*.tar.gz")
           if len(wheels) != 1 or len(sdists) != 1:
