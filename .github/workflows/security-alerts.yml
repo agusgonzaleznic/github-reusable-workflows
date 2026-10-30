@@ -1,0 +1,175 @@
+name: Security Alerts
+
+# Lists the open Dependabot, code scanning and secret scanning alerts of every repository an
+# account owns, and fails the run when any alert is open or when any answer cannot be trusted.
+# Call it on a schedule from a PRIVATE repository: the run summary names repositories, packages
+# and alert links, and anyone can read the runs of a public repository.
+#
+# alerts-token is a fine-grained personal access token with read access to Dependabot alerts,
+# code scanning alerts, secret scanning alerts and metadata, on all repositories. The job has no
+# `uses:` step, so no third-party action ever sees it.
+#
+# Only three answers mean "this scanner does not exist on this repository" (measured
+# 2026-10-30): on a private repository of a Free account, code scanning answers 403 and secret
+# scanning 404, and code scanning answers 404 "no analysis found" where CodeQL has nothing to
+# analyse. Every other answer that is not a 200 fails the run, so an expired, revoked or
+# under-scoped token can never read as "no alerts". So does a token that sees fewer than
+# min-repos repositories, and an alert kind that no repository answered for.
+#
+# control: true reads dismissed, fixed and resolved alerts instead of open ones, so the run must
+# fail: it proves the check can.
+on:
+  workflow_call:
+    inputs:
+      owner:
+        description: 'Account whose repositories are checked'
+        required: true
+        type: string
+      min-repos:
+        description: 'Fewest repositories the token must see; raise it when one is created'
+        required: true
+        type: number
+      control:
+        description: 'Read closed alerts instead of open ones; the run must fail'
+        required: false
+        type: boolean
+        default: false
+      runs-on:
+        description: 'Runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      alerts-token:
+        description: 'Fine-grained token, read-only: Dependabot, code scanning and secret scanning alerts, and metadata, on all repositories'
+        required: true
+
+# The job reads only through alerts-token; the GITHUB_TOKEN needs no permission.
+permissions: {}
+
+jobs:
+  alerts:
+    name: Open security alerts
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    steps:
+      - name: List the alerts of every repository
+        shell: python3 {0}
+        env:
+          GH_TOKEN: ${{ secrets.alerts-token }}
+          OWNER: ${{ inputs.owner }}
+          MIN_REPOS: ${{ inputs.min-repos }}
+          CONTROL: ${{ inputs.control }}
+        run: |
+          import datetime
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+
+          API = "https://api.github.com"
+          TOKEN, OWNER = os.environ["GH_TOKEN"], os.environ["OWNER"]
+          MIN_REPOS = int(os.environ["MIN_REPOS"])
+          CONTROL = os.environ.get("CONTROL") == "true"
+          NOW = datetime.datetime.now(datetime.timezone.utc)
+
+          # Alert kind: (endpoint, the states to read). A control run reads closed alerts.
+          KINDS = {
+              "dependabot": ("dependabot/alerts", "auto_dismissed,dismissed,fixed" if CONTROL else "open"),
+              "code scanning": ("code-scanning/alerts", "dismissed" if CONTROL else "open"),
+              "secret scanning": ("secret-scanning/alerts", "resolved" if CONTROL else "open"),
+          }
+          # The only answers that mean "this scanner does not exist on this repository", matched
+          # exactly. Anything else that is not a 200 fails the run.
+          NOT_AVAILABLE = {
+              ("code scanning", 403, "Code scanning is not enabled for this repository. Please enable code scanning in the repository settings."),
+              ("secret scanning", 404, "Secret scanning is disabled on this repository."),
+              ("code scanning", 404, "no analysis found"),
+          }
+
+
+          def get(url):
+              """GET every page. Returns (status, items) or (status, error message)."""
+              items = []
+              while url:
+                  req = urllib.request.Request(url, headers={
+                      "Authorization": f"Bearer {TOKEN}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  })
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          items.extend(json.load(r))
+                          m = re.search(r'<([^>]+)>;\s*rel="next"', r.headers.get("Link", ""))
+                          url = m.group(1) if m else None
+                  except urllib.error.HTTPError as e:
+                      try:
+                          msg = json.load(e).get("message", "")
+                      except Exception:
+                          msg = ""
+                      return e.code, msg
+                  except (urllib.error.URLError, TimeoutError) as e:
+                      return 0, str(e)
+              return 200, items
+
+
+          def row(repo, kind, a):
+              # An explicit field list: a secret scanning alert also carries the secret itself.
+              if kind == "dependabot":
+                  adv = a.get("security_advisory") or {}
+                  what = f"{((a.get('dependency') or {}).get('package') or {}).get('name', '?')} {adv.get('ghsa_id', '')}"
+                  severity = adv.get("severity", "?")
+              elif kind == "code scanning":
+                  rule = a.get("rule") or {}
+                  what, severity = rule.get("id", "?"), rule.get("security_severity_level") or rule.get("severity") or "?"
+              else:
+                  what, severity = a.get("secret_type_display_name") or "secret", "critical"
+              created = datetime.datetime.fromisoformat(a["created_at"].replace("Z", "+00:00"))
+              new = "NEW" if NOW - created < datetime.timedelta(days=8) else ""
+              return f"| {repo} | {kind} | [#{a['number']}]({a['html_url']}) | {severity} | {what} | {created:%Y-%m-%d} | {new} |"
+
+
+          def main():
+              errors, rows = [], []
+              answered = {kind: 0 for kind in KINDS}
+              status, repos = get(f"{API}/user/repos?affiliation=owner&per_page=100")
+              if status != 200:
+                  errors.append(f"listing repositories: HTTP {status} {repos}")
+                  repos = []
+              repos = sorted((r for r in repos if r["owner"]["login"] == OWNER and not r["archived"]), key=lambda r: r["name"])
+              if status == 200 and len(repos) < MIN_REPOS:
+                  errors.append(f"the token sees {len(repos)} repositories, fewer than min-repos ({MIN_REPOS})")
+              for r in repos:
+                  for kind, (path, states) in KINDS.items():
+                      st, res = get(f"{API}/repos/{OWNER}/{r['name']}/{path}?state={states}&per_page=100")
+                      if st == 200:
+                          answered[kind] += 1
+                          rows += [row(r["name"], kind, a) for a in res]
+                      elif (kind, st, res) not in NOT_AVAILABLE:
+                          errors.append(f"{r['name']}, {kind}: HTTP {st} {res}")
+              for kind, n in answered.items():
+                  if repos and not n:
+                      errors.append(f"no repository answered for {kind}: the token cannot read it")
+
+              title = "Control run, closed alerts read" if CONTROL else "Open security alerts"
+              out = [f"## {title}: {len(rows)}", "", f"{len(repos)} repositories of {OWNER} checked at {NOW:%Y-%m-%d %H:%M} UTC."]
+              if rows:
+                  out += ["", "| Repository | Kind | Alert | Severity | What | Created | |", "|---|---|---|---|---|---|---|", *rows]
+              if errors:
+                  out += ["", f"## Answers that could not be trusted: {len(errors)}", "", *[f"- {e}" for e in errors]]
+              report = "\n".join(out) + "\n"
+              print(report)
+              if os.environ.get("GITHUB_STEP_SUMMARY"):
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                      f.write(report)
+              if errors:
+                  print(f"::error title=Alert check could not be trusted::{len(errors)} answer(s) could not be trusted; see the run summary")
+                  sys.exit(2)
+              if rows:
+                  print(f"::error title={title}::{len(rows)} alert(s); see the run summary")
+                  sys.exit(1)
+
+
+          main()

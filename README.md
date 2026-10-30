@@ -277,6 +277,65 @@ caller's contract.
 
 ---
 
+### 6. Security Alerts (`security-alerts.yml`)
+
+Lists the open Dependabot, code scanning and secret scanning alerts of every repository an account
+owns, and fails the run when any alert is open or when any answer cannot be trusted. Alerts created
+in the last 8 days are marked NEW. Call it from a **private** repository: the run summary names
+repositories, packages and alert links, and anyone can read a public repository's runs.
+
+It fails closed: only the three answers that mean "this scanner does not exist here" (code scanning
+on a private Free-plan repository, secret scanning there, and a repository CodeQL has nothing to
+analyse in) are accepted besides a 200, so an expired, revoked or under-scoped token turns the run
+red instead of reading as no alerts. So does a token that sees fewer than `min-repos` repositories,
+and an alert kind no repository answered for. A run with `control: true` reads closed alerts
+instead and must fail, which proves the check can.
+
+**Usage:**
+
+```yaml
+name: Security alerts
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      control:
+        description: 'Read closed alerts instead of open ones; the run must fail'
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  alerts:
+    name: Alerts
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/security-alerts.yml@<full-commit-sha>  # v1.6.0
+    with:
+      owner: agusgonzaleznic
+      min-repos: 16
+      control: ${{ inputs.control || false }}
+    secrets:
+      alerts-token: ${{ secrets.SECURITY_ALERTS_TOKEN }}
+```
+
+**Inputs and secret:**
+
+| Name | Description | Required | Default |
+|------|-------------|----------|---------|
+| `owner` | Account whose repositories are checked | Yes | |
+| `min-repos` | Fewest repositories the token must see; raise it when one is created | Yes | |
+| `control` | Read closed alerts instead of open ones; the run must fail | No | `false` |
+| `runs-on` | Runner label | No | `'ubuntu-latest'` |
+| `alerts-token` (secret) | Fine-grained token, read-only: Dependabot alerts, Code scanning alerts, Secret scanning alerts and Metadata, on all repositories | Yes | |
+
+Pass the token as a named secret, never `secrets: inherit`. GitHub sends a failed scheduled run's
+notification to the account that created the workflow, or to the last one that changed its cron
+line, so only the owner's account should edit it.
+
+---
+
 ## General Notes
 
 - The Vite workflows use npm by default, but can be customized via inputs
