@@ -1,0 +1,23 @@
+name: Release
+
+# Publishes the GitHub release of each version tag pushed to this repository, with the shared
+# github-release.yml from the tagged commit itself, so every release runs the workflow it ships.
+# The notes are generated from the pull requests merged since the previous release.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions: {}
+
+# Two tags pushed together would race to publish. Queue them instead.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    uses: ./.github/workflows/github-release.yml
+    permissions:
+      contents: write

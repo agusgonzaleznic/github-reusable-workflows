@@ -1,7 +1,8 @@
 name: Python Tests
 
 # Runs a Python project's tests on each Python version in a matrix, in a fresh venv that installs
-# only hash-locked requirements (pip --require-hashes --no-deps --only-binary :all:).
+# only hash-locked requirements (pip --require-hashes --no-deps --only-binary :all:), or nothing
+# for a project that needs only the standard library (install-requirements: false).
 #
 # test-command is executed as given: pass only static strings, never event data.
 on:
@@ -17,6 +18,11 @@ on:
         required: false
         type: string
         default: 'requirements.txt'
+      install-requirements:
+        description: 'false for a project that needs only the standard library: the venv is made, nothing is installed and requirements is ignored'
+        required: false
+        type: boolean
+        default: true
       apt-packages:
         description: 'Space-separated apt packages the tests need'
         required: false
@@ -75,11 +81,17 @@ jobs:
           sudo timeout 300 apt-get update
           sudo timeout 300 apt-get install -y --no-install-recommends "${packages[@]}"
 
-      - name: Install the hash-locked requirements
+      - name: Create the venv and install the hash-locked requirements
         env:
+          INSTALL: ${{ inputs.install-requirements }}
           REQUIREMENTS: ${{ inputs.requirements }}
         run: |
           set -euo pipefail
+          python -m venv .venv
+          if [ "$INSTALL" != true ]; then
+            echo "install-requirements is false: the venv holds only the standard library"
+            exit 0
+          fi
           read -r -a files <<<"$REQUIREMENTS"
           if [ "${#files[@]}" -eq 0 ]; then
             echo "FAIL requirements is empty"
@@ -87,7 +99,6 @@ jobs:
           fi
           args=()
           for f in "${files[@]}"; do args+=(-r "$f"); done
-          python -m venv .venv
           .venv/bin/pip install --quiet --require-hashes --no-deps --only-binary :all: "${args[@]}"
 
       - name: Run the tests

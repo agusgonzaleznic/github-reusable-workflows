@@ -245,7 +245,8 @@ jobs:
 ### 5. Python Tests (`python-tests.yml`)
 
 Runs a Python project's tests once per Python version, in a fresh venv that installs only
-hash-locked requirements (`pip install --require-hashes --no-deps --only-binary :all:`).
+hash-locked requirements (`pip install --require-hashes --no-deps --only-binary :all:`). A project
+that needs only the standard library sets `install-requirements: false`, and the venv stays empty.
 
 **Usage:**
 
@@ -266,6 +267,7 @@ jobs:
 |-------|-------------|----------|---------|
 | `python-versions` | JSON list of Python versions, one job each | No | `'["3.12", "3.13"]'` |
 | `requirements` | Space-separated hash-locked requirement files | No | `'requirements.txt'` |
+| `install-requirements` | `false` installs nothing and ignores `requirements`, for a project that needs only the standard library | No | `true` |
 | `apt-packages` | Space-separated apt packages the tests need | No | `''` |
 | `pythonpath` | `PYTHONPATH` for the test command | No | `''` |
 | `test-command` | Command that runs the tests | No | `'.venv/bin/python -m pytest -q'` |
@@ -333,6 +335,64 @@ jobs:
 Pass the token as a named secret, never `secrets: inherit`. GitHub sends a failed scheduled run's
 notification to the account that created the workflow, or to the last one that changed its cron
 line, so only the owner's account should edit it.
+
+---
+
+### 7. GitHub Release (`github-release.yml`)
+
+Publishes the GitHub release of the version tag that started the calling workflow, from the trunk
+only: it fails on anything but a tag `vX.Y.Z`, on a tag that no longer names the commit the run
+started from, and on a tag whose commit is not on the default branch. The notes are generated from
+the pull requests merged since the previous release. With `artifact-name` set, the files of that
+artifact are attached with a `SHA256SUMS` file for them; gh keeps the release a draft until every
+file is uploaded and deletes the draft when an upload fails.
+
+**Usage** (`.github/workflows/release.yml`, with the build from section 3):
+
+```yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Package build
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/python-build.yml@<full-commit-sha>  # v1.7.0
+    permissions:
+      contents: read
+
+  release:
+    name: Release  # its check: "Release / Publish the release"
+    needs: build
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/github-release.yml@<full-commit-sha>  # v1.8.0
+    permissions:
+      contents: write  # creates the release and uploads its files, nothing else
+    with:
+      artifact-name: python-dist  # Optional, default: '' (attaches nothing)
+```
+
+**Inputs:**
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `artifact-name` | Artifact whose files are attached, with a `SHA256SUMS` file; empty attaches nothing | No | `''` |
+| `runs-on` | Runner label | No | `'ubuntu-latest'` |
+
+**Outputs:** `url`, the URL of the published release.
+
+**Check a download:** in the folder that holds the downloaded files, `sha256sum -c SHA256SUMS`
+(`shasum -a 256 -c SHA256SUMS` on macOS).
+
+This repository's own `release.yml` calls it on every version tag, from the tagged commit.
 
 ---
 
