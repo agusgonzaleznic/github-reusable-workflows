@@ -10,7 +10,8 @@ on:
 
 permissions: {}
 
-# Two tags pushed together would race to publish. Queue them instead.
+# One release at a time: a tag pushed while a release runs waits for it. GitHub keeps only the
+# newest waiting run of a group and cancels an older one, so push one tag at a time.
 concurrency:
   group: release
   cancel-in-progress: false
