@@ -1,0 +1,139 @@
+name: GitHub Release
+
+# Publishes the GitHub release of the version tag that started the calling workflow, from the trunk
+# only. It refuses anything but a tag vX.Y.Z, a tag that no longer names the commit the run started
+# from, and a tag whose commit is not on the default branch: every release is cut from main. The
+# notes are generated from the pull requests merged since the previous release.
+#
+# With artifact-name set, the files of that artifact (python-build.yml's python-dist, for example)
+# are attached with a SHA256SUMS file for them. gh keeps the release a draft until every file is
+# uploaded and deletes the draft when an upload fails, so a release is never seen half attached.
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: 'Artifact whose files are attached, with a SHA256SUMS file; empty attaches nothing'
+        required: false
+        type: string
+        default: ''
+      runs-on:
+        description: 'Runner label for the job'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    outputs:
+      url:
+        description: 'The URL of the published release'
+        value: ${{ jobs.release.outputs.url }}
+
+jobs:
+  # The job name is half of the callers' check names ("Release / Publish the release"): renaming
+  # it is a breaking change.
+  release:
+    name: Publish the release
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    # The caller grants this, and nothing more: the job creates a release and uploads its files.
+    permissions:
+      contents: write
+    outputs:
+      url: ${{ steps.publish.outputs.url }}
+
+    steps:
+      - name: Refuse anything but a version tag on the trunk
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+          RUN_SHA: ${{ github.sha }}
+          TRUNK: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != tag ]; then
+            echo "::error::Not a tag ($REF_TYPE '$TAG'): a release starts from a version tag"
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::'$TAG' is not a version tag vX.Y.Z"
+            exit 1
+          fi
+          if [ -z "$TRUNK" ]; then
+            echo "::error::The event names no default branch"
+            exit 1
+          fi
+
+          # The commit the tag names now. An annotated tag points at a tag object first.
+          ref=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '"\(.object.type) \(.object.sha)"')
+          read -r type sha <<<"$ref"
+          while [ "$type" = tag ]; do
+            ref=$(gh api "repos/$REPO/git/tags/$sha" --jq '"\(.object.type) \(.object.sha)"')
+            read -r type sha <<<"$ref"
+          done
+          if [ "$type" != commit ]; then
+            echo "::error::$TAG names a $type, not a commit"
+            exit 1
+          fi
+          if [ "$sha" != "$RUN_SHA" ]; then
+            echo "::error::$TAG names $sha now, but this run started from $RUN_SHA"
+            exit 1
+          fi
+
+          # Compared with the tagged commit, the trunk is "identical" or "ahead" exactly when it
+          # contains that commit; "behind" or "diverged" means the tag is off the trunk.
+          status=$(gh api "repos/$REPO/compare/$sha...$TRUNK" --jq .status)
+          case "$status" in
+            identical|ahead)
+              echo "$TAG ($sha) is on $TRUNK (compare: $status)"
+              ;;
+            *)
+              echo "::error::$TAG ($sha) is not on $TRUNK (compare: $status)"
+              exit 1
+              ;;
+          esac
+
+      - name: Download the files to attach
+        if: inputs.artifact-name != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: release-files
+
+      - name: Write SHA256SUMS
+        if: inputs.artifact-name != ''
+        working-directory: release-files
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::The artifact holds no files"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ] || [ "$f" = SHA256SUMS ]; then
+              echo "::error::Cannot attach '$f': only plain files, and none named SHA256SUMS"
+              exit 1
+            fi
+          done
+          # shasum is on Linux and macOS runners alike; its output is what sha256sum -c reads.
+          shasum -a 256 -- "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          ATTACH: ${{ inputs.artifact-name != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$ATTACH" = true ]; then
+            gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" --generate-notes release-files/*
+          else
+            gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" --generate-notes
+          fi
+          url=$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Published [$TAG]($url)" >> "$GITHUB_STEP_SUMMARY"
