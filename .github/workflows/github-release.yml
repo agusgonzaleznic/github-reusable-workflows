@@ -1,9 +1,10 @@
 name: GitHub Release
 
-# Publishes the GitHub release of the version tag that started the calling workflow, from the trunk
-# only. It refuses anything but a tag vX.Y.Z, a tag that no longer names the commit the run started
-# from, and a tag whose commit is not on the default branch: every release is cut from main. The
-# notes are generated from the pull requests merged since the previous release.
+# Publishes the GitHub release of the version tag the calling workflow runs on, pushed or started on
+# with workflow_dispatch (as version-tag.yml does), from the trunk only. It refuses anything but a
+# tag vX.Y.Z, a tag that no longer names the commit the run started from, and a tag whose commit is
+# not on the default branch: every release is cut from main. The notes are generated from the pull
+# requests merged since the previous release.
 #
 # With artifact-name set, the files of that artifact (python-build.yml's python-dist, for example)
 # are attached with a SHA256SUMS file for them. gh keeps the release a draft until every file is
