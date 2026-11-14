@@ -454,6 +454,83 @@ def a08_a_commit_without_a_pull_request_gets_a_warning(root, step):
     return expect(res, 0, created=["v1.1.0"], dispatched=["v1.1.0"], says="::warning::")
 
 
+# ---- tags without the v (X.Y.Z, made by hand before this workflow) ----
+
+def bare(root, files):
+    """A repository whose only tag is 1.0.0, without the v, with no run and no GitHub release known."""
+    fx = Fixture(root)
+    fx.commit(files)
+    fx.tag("1.0.0")
+    return fx
+
+
+BARE = {"releases": [], "runs_by_tag": {}}
+
+
+@scenario
+def b01_a_bare_newest_tag_with_nothing_shipped_starts_no_release(root, step):
+    fx = bare(root, {".github/workflows/x.yml": "on: push\n"})
+    fx.commit({"README.md": "docs\n"})
+    return expect(run(fx, step, tags=True, paths=WF, state=BARE), 0, says="Nothing to release: 1.0.0 is out")
+
+
+@scenario
+def b02_a_bare_newest_tag_counts_for_the_next_version(root, step):
+    fx = bare(root, {".github/workflows/x.yml": "on: push\n"})
+    fx.commit({".github/workflows/y.yml": "on: push\n"})
+    return expect(run(fx, step, tags=True, paths=WF, state=BARE), 0, created=["v1.1.0"], dispatched=["v1.1.0"],
+                  says="Released v1.1.0")
+
+
+@scenario
+def b03_the_v_tag_wins_when_both_name_the_newest_version(root, step):
+    fx = base(root)
+    fx.tag("1.0.0")  # git lists 1.0.0 before v1.0.0: the tie needs its own rule
+    fx.commit({"README.md": "docs\n"})
+    # v1.0.0 has neither a run nor a release, so finishing it starts its release; the bare tag would not
+    return expect(run(fx, step, tags=True, paths=WF, state=BARE), 0, dispatched=["v1.0.0"], says="starting its release again")
+
+
+@scenario
+def b04_a_bare_tag_older_than_a_v_tag_is_not_the_newest(root, step):
+    fx = bare(root, {".github/workflows/x.yml": "on: push\n"})
+    fx.commit({".github/workflows/y.yml": "on: push\n"})
+    fx.tag("v1.1.0")
+    fx.commit({".github/workflows/z.yml": "on: push\n"})
+    res = run(fx, step, tags=True, paths=WF, state={"releases": [], "runs_by_tag": {"v1.1.0": [DONE]}})
+    return expect(res, 0, created=["v1.2.0"], dispatched=["v1.2.0"])
+
+
+@scenario
+def b05_a_bare_newest_tag_in_version_mode(root, step):
+    files = {"pkg/__init__.py": '__version__ = "1.0.0"\n', "README.md": "readme\n"}
+    fx = bare(root, files)
+    fx.commit({"tests/test_x.py": "pass\n"})
+    problems = expect(run(fx, step, version="1.0.0", state=BARE), 0, says="Nothing to release: 1.0.0 is out")
+    fx.commit({"README.md": "better\n"})
+    problems += expect(run(fx, step, version="1.0.0", state=BARE), 1, says="changed since 1.0.0")
+    fx.bump("1.0.1")
+    return problems + expect(run(fx, step, version="1.0.1", state=BARE), 0, created=["v1.0.1"], dispatched=["v1.0.1"])
+
+
+@scenario
+def b06_pull_requests_read_a_bare_newest_tag(root, step):
+    fx = bare(root, {"pkg/__init__.py": '__version__ = "1.0.0"\n', ".github/workflows/x.yml": "on: push\n"})
+    pr = fx.topic({"pkg/__init__.py": '__version__ = "1.0.0"\n# more\n', ".github/workflows/y.yml": "on: push\n"})
+    common = dict(event="pull_request", ref="refs/pull/1/merge", pr=pr, state=BARE)
+    return (expect(run(fx, step, version="1.0.0", **common), 1, says="and 1.0.0 is already out")
+            + expect(run(fx, step, tags=True, paths=WF, labels="[]", **common), 0, says="The merge releases v1.1.0"))
+
+
+@scenario
+def b07_bare_tags_of_another_shape_are_ignored(root, step):
+    fx = base(root)
+    for t in ("2", "3.0.0-rc1", "04.0.0", "1.5"):
+        fx.tag(t)
+    fx.commit({".github/workflows/new.yml": "on: push\n"})
+    return expect(run(fx, step, tags=True, paths=WF), 0, created=["v1.1.0"], dispatched=["v1.1.0"])
+
+
 def extract(workflow, dest):
     """Writes the run script of the step with id "version" to dest."""
     script = subprocess.run(["yq", "-r", '.jobs.version.steps[] | select(.id == "version") | .run', str(workflow)],
