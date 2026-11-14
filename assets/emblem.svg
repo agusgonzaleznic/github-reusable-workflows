@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">github-reusable-workflows emblem: three connected steps, the last one the result</title>
+  <rect width="256" height="256" rx="56" fill="#1A1D23"/>
+  <g stroke="#FAFAFA" stroke-width="10" stroke-linecap="round" fill="none">
+    <path d="M58 128H186"/>
+  </g>
+  <rect x="34" y="104" width="48" height="48" rx="12" fill="#FAFAFA"/>
+  <rect x="98" y="104" width="48" height="48" rx="12" fill="#FAFAFA"/>
+  <circle cx="190" cy="128" r="28" fill="#1A1D23" stroke="#DE3412" stroke-width="10"/>
+</svg>
