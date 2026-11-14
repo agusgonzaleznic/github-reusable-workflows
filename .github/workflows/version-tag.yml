@@ -9,13 +9,18 @@ name: Version Tag
 #
 # - version: for a package whose files carry their version (Python's __version__, say). The pull
 #   request raises it. A pull request that changes a release path needs a version newer than every
-#   vX.Y.Z tag. On main a newer version is tagged and released, and main fails when a release path
+#   version tag. On main a newer version is tagged and released, and main fails when a release path
 #   changed since the newest tag while the version stayed, because that change would never ship.
 #   An empty version fails, so a typo in the caller cannot fall through to the other way.
 # - version-from-tags: true, for a repository whose tags are its only version. On main, when a
 #   release path changed since the newest tag, the next version is tagged: the minor version up, or
 #   the major version up when a pull request merged since that tag has the label "breaking"; 1.0.0
 #   when there is no tag yet.
+#
+# Version tags are vX.Y.Z. A tag X.Y.Z without the v (made by hand before this workflow, say) counts
+# as a version too, and as released: github-release.yml releases v tags only, so no run could. When
+# both forms name the newest version, the v tag is the one used. New tags always get the v. Tags of
+# any other shape are left out.
 #
 # Only the run of the trunk's current tip tags anything. A re-run of an older commit passes with a
 # notice, and the tip's run releases what it carries.
@@ -129,14 +134,17 @@ jobs:
             return 1
           }
 
-          # Of the tag names on stdin, the newest vX.Y.Z without its v; empty when there is none.
-          # Tags of any other shape are left out.
+          # Of the tag names on stdin, the name of the newest version tag: vX.Y.Z, or X.Y.Z without
+          # the v, and the v form when both name that version. Empty when there is none. Tags of
+          # any other shape are left out.
           newest_tag() {
-            local best='' t v
+            local best='' version='' t v
             while IFS= read -r t; do
               v=${t#v}
               if ! is_version "$v"; then continue; fi
-              if [ -z "$best" ] || newer "$v" "$best"; then best=$v; fi
+              if [ -z "$best" ] || newer "$v" "$version" || { [ "$v" = "$version" ] && [[ $t == v* ]]; }; then
+                best=$t version=$v
+              fi
             done
             printf '%s\n' "$best"
           }
@@ -296,8 +304,11 @@ jobs:
             return 1
           }
 
-          tags=$(git tag --list 'v*') || fail "Cannot list the tags"
+          # The newest version tag (v1.2.0, or 1.2.0 without the v) and its version (1.2.0). Git
+          # commands name it as refs/tags/..., so a bare version can never read as another ref.
+          tags=$(git tag --list) || fail "Cannot list the tags"
           newest=$(newest_tag <<<"$tags")
+          newest_version=${newest#v}
 
           case "$EVENT" in
             pull_request)
@@ -312,10 +323,10 @@ jobs:
               if [ "$VERSION_FROM_TAGS" = true ]; then
                 breaking=no
                 if jq -e 'index("breaking")' <<<"$PR_LABELS" >/dev/null; then breaking=yes; fi
-                next=$(next_version "$newest" "$breaking")
+                next=$(next_version "$newest_version" "$breaking")
               else
-                if [ -n "$newest" ] && ! newer "$VERSION" "$newest"; then
-                  fail "This pull request changes files that ship ($(brief "$shipped")), but the version is $VERSION and v$newest is already out. Raise the version."
+                if [ -n "$newest" ] && ! newer "$VERSION" "$newest_version"; then
+                  fail "This pull request changes files that ship ($(brief "$shipped")), but the version is $VERSION and $newest is already out. Raise the version."
                 fi
                 next=$VERSION
               fi
@@ -342,21 +353,21 @@ jobs:
                 if [ -z "$newest" ]; then
                   target=1.0.0
                 else
-                  shipped=$(changed "v$newest" "$SHA" | shipping)
+                  shipped=$(changed "refs/tags/$newest" "$SHA" | shipping)
                   if [ -n "$shipped" ]; then
                     breaking=no
-                    if breaking_since "v$newest"; then breaking=yes; fi
-                    target=$(next_version "$newest" "$breaking")
+                    if breaking_since "refs/tags/$newest"; then breaking=yes; fi
+                    target=$(next_version "$newest_version" "$breaking")
                   fi
                 fi
-              elif [ -z "$newest" ] || newer "$VERSION" "$newest"; then
+              elif [ -z "$newest" ] || newer "$VERSION" "$newest_version"; then
                 target=$VERSION
-              elif [ "$VERSION" != "$newest" ]; then
-                fail "The version $VERSION is older than the newest release, v$newest"
+              elif [ "$VERSION" != "$newest_version" ]; then
+                fail "The version $VERSION is older than the newest release, $newest"
               else
-                shipped=$(changed "v$newest" "$SHA" | shipping)
+                shipped=$(changed "refs/tags/$newest" "$SHA" | shipping)
                 if [ -n "$shipped" ]; then
-                  problem="Files that ship changed since v$newest ($(brief "$shipped")), but the version is still $VERSION, so nothing was released. Raise the version in a pull request."
+                  problem="Files that ship changed since $newest ($(brief "$shipped")), but the version is still $VERSION, so nothing was released. Raise the version in a pull request."
                 fi
               fi
 
@@ -369,27 +380,30 @@ jobs:
               fi
 
               # Nothing newer: the newest tag's release has to be finished. Its runs decide; the
-              # GitHub release counts only for a tag no run ever released.
-              state=$(release_state "v$newest") || fail "Cannot list the runs of $RELEASE_WORKFLOW for v$newest"
-              kind=${state%% *}
-              run=${state#* }
-              case "$kind" in
-                done) ;;
-                active)
-                  note "The release run of v$newest is still going: waiting for it."
-                  watch "$run" "v$newest"
-                  ;;
-                failed) rerun "$run" "v$newest" ;;
-                none)
-                  if ! has_release "v$newest"; then
-                    note "v$newest has a tag but no release: starting its release again."
-                    release "v$newest"
-                  fi
-                  ;;
-                *) fail "Cannot read the runs of $RELEASE_WORKFLOW for v$newest: the answer was '$state'" ;;
-              esac
+              # GitHub release counts only for a tag no run ever released. A tag without the v is
+              # released already: no run could release it.
+              if [[ $newest == v* ]]; then
+                state=$(release_state "$newest") || fail "Cannot list the runs of $RELEASE_WORKFLOW for $newest"
+                kind=${state%% *}
+                run=${state#* }
+                case "$kind" in
+                  done) ;;
+                  active)
+                    note "The release run of $newest is still going: waiting for it."
+                    watch "$run" "$newest"
+                    ;;
+                  failed) rerun "$run" "$newest" ;;
+                  none)
+                    if ! has_release "$newest"; then
+                      note "$newest has a tag but no release: starting its release again."
+                      release "$newest"
+                    fi
+                    ;;
+                  *) fail "Cannot read the runs of $RELEASE_WORKFLOW for $newest: the answer was '$state'" ;;
+                esac
+              fi
               if [ -n "$problem" ]; then fail "$problem"; fi
-              note "Nothing to release: v$newest is out, and nothing that ships changed since."
+              note "Nothing to release: $newest is out, and nothing that ships changed since."
               ;;
 
             *)
