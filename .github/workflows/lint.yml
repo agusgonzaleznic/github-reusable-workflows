@@ -46,6 +46,21 @@ jobs:
       - name: Run the scenarios
         run: python3 -I tests/version-tag/test_version_tag.py
 
+  # The cases of dependency-snapshot.yml's two steps, run on requirements files in throwaway
+  # folders and against a stand-in for gh: nothing here talks to GitHub.
+  test-dependency-snapshot:
+    name: Test dependency-snapshot.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the cases
+        run: python3 -I tests/dependency-snapshot/test_dependency_snapshot.py
+
   # On a pull request: which version the merge releases ("Release / Check the version").
   check-version:
     name: Release
@@ -57,13 +72,13 @@ jobs:
       version-from-tags: true
       release-paths: .github/workflows/
 
-  # On main, once the lint and the tests passed: tags the next version when a workflow
+  # On main, once the lint and both tests passed: tags the next version when a workflow
   # changed since the newest tag, runs release.yml on it and waits for it ("Release / Tag
   # the version").
   release:
     name: Release
     if: github.event_name == 'push'
-    needs: [lint, test]
+    needs: [lint, test, test-dependency-snapshot]
     uses: ./.github/workflows/version-tag.yml
     permissions:
       contents: write

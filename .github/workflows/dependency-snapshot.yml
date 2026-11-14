@@ -1,0 +1,225 @@
+name: Dependency Snapshot
+
+# Sends GitHub's dependency graph the versions that pinned Python requirements files hold, through
+# the dependency submission API, so Dependabot alerts follow those files. A submitted snapshot takes
+# precedence over the graph's own entry for the same file, and that entry can lag: on 14 November
+# 2026 a repository's entry for one of its locks was still the one from 29 October, made by a graph
+# job that ran only when pyproject.toml changed, so an alert stayed open after its fix had merged.
+#
+# Call it on push to the default branch. Each file is read as pip reads it (a line ending in a
+# backslash continues on the next, comments are removed), and every requirement must pin one version
+# with ==, as `uv pip compile` and pip-compile write them; extras, markers and hashes are fine.
+# Anything else (a range, a URL, an option such as -r or --index-url) fails the run, so the graph
+# never gets a version a file does not pin and never misses one an included file would add. A pin
+# line whose comment ends in a backslash fails too: pip joins the next line into the comment and uv
+# does not. A name pinned at two versions under different markers is listed at both.
+#
+# Each snapshot replaces the last one with the same correlator, so a repository that calls this twice
+# gives each call its own. A run whose commit is no longer the head of its branch sends nothing, so an
+# older run can't take the graph back to older versions. GitHub answers SUCCESS (the graph is
+# updated), ACCEPTED (stored, but the graph is not updated) or INVALID; on the default branch only
+# SUCCESS passes, and elsewhere ACCEPTED is a warning with GitHub's reason.
+on:
+  workflow_call:
+    inputs:
+      runtime-files:
+        description: 'Pinned requirements files the project runs with, separated by spaces or new lines'
+        required: false
+        type: string
+        default: ''
+      development-files:
+        description: 'Pinned requirements files the project builds or tests with, separated by spaces or new lines'
+        required: false
+        type: string
+        default: ''
+      correlator:
+        description: 'Name of this submission; a later one with the same name replaces it'
+        required: false
+        type: string
+        default: 'pinned-requirements'
+      runs-on:
+        description: 'Runner label for the job'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  # The job name is half of the callers' check names ("Dependencies / Submit the dependency
+  # snapshot"): renaming it is a breaking change.
+  snapshot:
+    name: Submit the dependency snapshot
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    # The caller grants this, and nothing more: the snapshot API takes nothing less.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # tests/dependency-snapshot/test_dependency_snapshot.py runs this step's script, found by its
+      # name: keep the two in step.
+      - name: Build the snapshot
+        shell: python3 {0}
+        env:
+          RUNTIME_FILES: ${{ inputs.runtime-files }}
+          DEVELOPMENT_FILES: ${{ inputs.development-files }}
+          CORRELATOR: ${{ inputs.correlator }}
+        run: |
+          import datetime
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+          import urllib.parse
+
+          # pip's comment: a # at the start of a line or after whitespace.
+          COMMENT = re.compile(r"(^|\s+)#.*$")
+          # name[extras] == version, then an optional marker and --hash options.
+          PIN = re.compile(r"([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[[^\]]*\])?\s*==\s*([A-Za-z0-9!+_.-]+)"
+                           r"(?:\s*;.*?)?(?:\s+--hash(?:=|\s+)\S+)*\s*")
+
+
+          def fail(msg):
+              print(f"::error title=Dependency snapshot::{msg}")
+              sys.exit(1)
+
+
+          def logical_lines(path, text):
+              """(first line number, line) as pip reads a requirements file: a line ending in a backslash
+              continues on the next one unless it starts with a comment, and comments are removed."""
+              first, parts = 0, []
+              for n, raw in enumerate(text.splitlines(), 1):
+                  if raw.endswith("\\") and not COMMENT.match(raw):
+                      if COMMENT.search(raw):
+                          fail(f"{path}:{n}: a comment on a line that ends in a backslash, which pip and uv read differently")
+                      if not parts:
+                          first = n
+                      parts.append(raw.strip("\\"))
+                      continue
+                  if COMMENT.match(raw):
+                      raw = " " + raw
+                  if parts:
+                      n, raw, parts = first, "".join(parts) + raw, []
+                  line = COMMENT.sub("", raw).strip()
+                  if line:
+                      yield n, line
+              if parts:  # the file ends on a continuation
+                  line = COMMENT.sub("", "".join(parts)).strip()
+                  if line:
+                      yield first, line
+
+
+          def pins(path):
+              """The (name, version) pairs one file pins, names normalised as on PyPI."""
+              found = set()
+              for n, line in logical_lines(path, pathlib.Path(path).read_text()):
+                  if line.startswith("-"):
+                      fail(f"{path}:{n}: an option line, which this workflow does not follow: {line[:80]}")
+                  m = PIN.fullmatch(line)
+                  if not m:
+                      fail(f"{path}:{n}: not pinned to one version with ==: {line[:80]}")
+                  found.add((re.sub(r"[-_.]+", "-", m.group(1)).lower(), m.group(2)))
+              if not found:
+                  fail(f"{path}: pins no package")
+              return found
+
+
+          def files(var):
+              root, out = pathlib.Path.cwd().resolve(), []
+              for p in os.environ.get(var, "").split():
+                  pp = pathlib.PurePosixPath(p)
+                  if pp.is_absolute() or ".." in pp.parts:
+                      fail(f"{var}: {p} is not a path inside the repository")
+                  if not (root / pp).is_file():
+                      fail(f"{var}: {p} is not a file")
+                  if not (root / pp).resolve().is_relative_to(root):
+                      fail(f"{var}: {p} leads outside the repository")
+                  if str(pp) not in out:
+                      out.append(str(pp))
+              return out
+
+
+          def main():
+              env = os.environ
+              runtime, development = files("RUNTIME_FILES"), files("DEVELOPMENT_FILES")
+              if not runtime and not development:
+                  fail("no file given: set runtime-files, development-files or both")
+              both = sorted(set(runtime) & set(development))
+              if both:
+                  fail(f"listed as both runtime and development: {', '.join(both)}")
+              correlator = env.get("CORRELATOR", "").strip()
+              if not correlator:
+                  fail("the correlator is empty")
+              manifests = {}
+              for scope, paths in (("runtime", runtime), ("development", development)):
+                  for path in paths:
+                      resolved = {}
+                      for name, version in sorted(pins(path)):
+                          purl = f"pkg:pypi/{name}@{urllib.parse.quote(version, safe='')}"
+                          resolved[purl] = {"package_url": purl, "scope": scope}
+                      manifests[path] = {"name": path, "file": {"source_location": path}, "resolved": resolved}
+                      print(f"{path}: {len(resolved)} pinned packages, {scope}")
+                      for purl in resolved:
+                          print(f"  {purl}")
+              snapshot = {
+                  "version": 0,
+                  "sha": env["GITHUB_SHA"],
+                  "ref": env["GITHUB_REF"],
+                  "job": {
+                      "correlator": correlator,
+                      "id": env["GITHUB_RUN_ID"],
+                      "html_url": f"{env['GITHUB_SERVER_URL']}/{env['GITHUB_REPOSITORY']}/actions/runs/{env['GITHUB_RUN_ID']}",
+                  },
+                  "detector": {
+                      "name": "pinned-requirements",
+                      "version": "1",
+                      "url": "https://github.com/agusgonzaleznic/github-reusable-workflows",
+                  },
+                  "scanned": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "manifests": manifests,
+              }
+              pathlib.Path(env["RUNNER_TEMP"], "dependency-snapshot.json").write_text(json.dumps(snapshot, indent=1))
+
+
+          main()
+
+      # The test runs this step's script too, against a stand-in for gh.
+      - name: Submit the snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # The run of a newer commit sends that commit's snapshot; this one, sent after it, would
+          # take the graph back.
+          if [[ "$REF" == refs/heads/* ]]; then
+            head=$(gh api "repos/$REPO/git/ref/${REF#refs/}" --jq .object.sha)
+            if [ "$head" != "$SHA" ]; then
+              echo "::notice title=Dependency snapshot::${REF#refs/heads/} has moved on to $head, whose run sends the snapshot"
+              exit 0
+            fi
+          fi
+          response=$(gh api --method POST "repos/$REPO/dependency-graph/snapshots" \
+            --input "$RUNNER_TEMP/dependency-snapshot.json")
+          echo "$response"
+          result=$(jq -r '.result' <<<"$response")
+          message=$(jq -r '.message' <<<"$response")
+          case "$result" in
+            SUCCESS) echo "::notice title=Dependency snapshot::$message" ;;
+            ACCEPTED)
+              # The graph must follow the default branch; an unknown default branch counts as this one.
+              if [ -z "$DEFAULT_BRANCH" ] || [ "$REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                echo "::error title=Dependency snapshot::Stored, but the dependency graph was not updated: $message"
+                exit 1
+              fi
+              echo "::warning title=Dependency snapshot::Stored, but the dependency graph was not updated: $message" ;;
+            *) echo "::error title=Dependency snapshot::GitHub answered $result: $message"; exit 1 ;;
+          esac

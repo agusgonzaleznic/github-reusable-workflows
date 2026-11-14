@@ -6,10 +6,10 @@
 
 ### One place for the CI/CD steps my repositories share.
 
-**Eight reusable GitHub Actions workflows:** build and deploy a Vite site, build and test a Python
-package, lint workflows and prove their action pins, check security alerts, and make the merge to
-`main` the release. Callers pin a full commit SHA, and every input, output and permission is read
-from the workflow files.
+**Nine reusable GitHub Actions workflows:** build and deploy a Vite site, build and test a Python
+package, send the dependency graph its pinned dependencies, lint workflows and prove their action
+pins, check security alerts, and make the merge to `main` the release. Callers pin a full commit SHA,
+and every input, output and permission is read from the workflow files.
 
 <br>
 
@@ -29,7 +29,7 @@ from the workflow files.
 
 Each file under `.github/workflows/` with `workflow_call` as its trigger is a reusable workflow.
 A repository calls one with a short job and keeps nothing else of it. As of 14 November 2026 there
-are eight, and the latest release is v1.10.0. Two more files here, `lint.yml` and `release.yml`, are
+are nine, and the latest release is v1.11.0. Two more files here, `lint.yml` and `release.yml`, are
 this repository's own gate and release, and they call the shared ones.
 
 What it doesn't do:
@@ -38,8 +38,8 @@ What it doesn't do:
 - **The Vite cache is npm only.** The two Vite workflows always set up Node with `cache: 'npm'`. The
   install, lint and build commands are inputs.
 - **No test of the Vite, Python and alert workflows until someone calls them.** Every pull request
-  here runs actionlint, the action-pin check and the scenarios of `version-tag.yml`, and
-  `github-release.yml` runs on every release.
+  here runs actionlint, the action-pin check, and the cases of `version-tag.yml` and
+  `dependency-snapshot.yml` against a stand-in for gh, and `github-release.yml` runs on every release.
 - **No licence file yet** (see [Licence](#licence)).
 
 ## ⚡ Quick start
@@ -53,8 +53,8 @@ jobs:
     uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@3f7c141f6c330d47a854111aabf2b48d827d2cd1  # v1.10.0
 ```
 
-Every example below pins v1.10.0, the latest release as of 14 November 2026. Resolve the SHA of the
-release you want with:
+Every example below pins v1.10.0, and `dependency-snapshot.yml` needs v1.11.0 or later. Resolve the SHA
+of the release you want with:
 
 ```bash
 gh api repos/agusgonzaleznic/github-reusable-workflows/commits/v1.10.0 --jq .sha
@@ -71,6 +71,7 @@ contract, and a ruleset can require them. Each workflow file documents its input
 | [`python-build.yml`](#python-build) | Builds the sdist and wheel with uv, uploads them as one artifact | `contents: read` | `Build sdist and wheel` |
 | [`actions-lint.yml`](#lint-workflows-and-action-pins) | actionlint plus a proof of every action pin | `contents: read` | `actionlint`, `Verify action pins` |
 | [`python-tests.yml`](#python-tests) | Runs the tests once per Python version, from hash-locked requirements | `contents: read` | `Python 3.12`, `Python 3.13` (one per version) |
+| [`dependency-snapshot.yml`](#dependency-snapshot) | Sends the dependency graph the versions that pinned requirements files hold | `contents: write` | `Submit the dependency snapshot` |
 | [`security-alerts.yml`](#security-alerts) | Lists open alerts of every repository an account owns, fails on any | nothing | `Open security alerts` |
 | [`github-release.yml`](#github-release) | Publishes the GitHub release of a version tag, from the trunk only | `contents: write` | `Publish the release` |
 | [`version-tag.yml`](#version-tag) | Makes the merge to the default branch the release | see [Version Tag](#version-tag) | `Check the version`, `Tag the version` |
@@ -186,6 +187,22 @@ library sets `install-requirements: false`, and the venv stays empty. A ruleset 
 Call it from a job named `Tests` (its checks are `Tests / Python 3.12` and `Tests / Python 3.13`)
 with `requirements: requirements/lock.txt requirements/test.txt`, and optionally `apt-packages`
 (`ghostscript`, say) and `pythonpath` (`src`, say).
+
+### Dependency Snapshot
+
+[`dependency-snapshot.yml`](.github/workflows/dependency-snapshot.yml) sends GitHub's dependency
+graph the versions that pinned Python requirements files hold, so Dependabot alerts follow those
+files. The graph's own entry for a file can stay at an older commit and keep an alert open after its
+fix merged, and a submitted snapshot takes precedence over that entry. Every requirement must pin one
+version with `==`, as `uv pip compile` writes it, or the run fails, so the graph never gets a version
+a file doesn't pin. It reads requirements files only, not `uv.lock` or another ecosystem's lock.
+
+Call it on push to the default branch from a job named `Dependencies` (its check is
+`Dependencies / Submit the dependency snapshot`) with `contents: write`, which the API requires, and
+`runtime-files: requirements/lock.txt`, optionally `development-files: requirements/test.txt`. A run
+whose commit is no longer its branch's head sends nothing, and on the default branch only GitHub's
+answer `SUCCESS` passes. A second call in the same repository needs its own `correlator` (default
+`pinned-requirements`): each snapshot replaces the last one with the same correlator.
 
 ### Security Alerts
 
@@ -385,9 +402,10 @@ Callers pin to commit SHAs of this repository, so its integrity is the root of t
   ([CVE-2025-30066](https://github.com/advisories/GHSA-mrrh-fwg8-r2c3)). `actions-lint.yml` proves
   each pin in this repository on every pull request.
 - **Least-privilege `GITHUB_TOKEN`.** Each workflow declares the minimum it needs: `pages: write` and
-  `id-token: write` only on the deploy job, `contents: write` only to publish a release, nothing at all
-  for `security-alerts.yml`, and `version-tag.yml` runs with what the caller grants. None of them sets a
-  `concurrency` group: that belongs to the caller, or the two can deadlock.
+  `id-token: write` only on the deploy job, `contents: write` only to publish a release or send a
+  dependency snapshot, nothing at all for `security-alerts.yml`, and `version-tag.yml` runs with what
+  the caller grants. None of them sets a `concurrency` group: that belongs to the caller, or the two
+  can deadlock.
 - **`persist-credentials: false`** on every checkout, so the token isn't written to `.git/config`, and
   **data inputs go through `env:`** and are quoted in `run:` blocks (`artifact-path`, for example),
   which removes that shell-injection class.
@@ -408,8 +426,8 @@ Callers pin to commit SHAs of this repository, so its integrity is the root of t
   `Lint / Verify action pins` on an up-to-date branch.
 - **`Protect version tags (v*)`:** no deletion, no update, no force push, and no bypass actor.
 
-Three gaps remain: a repository admin can bypass the `main` ruleset, and neither `Test version-tag.yml`
-nor `Release / Check the version` is a required check yet.
+Four gaps remain: a repository admin can bypass the `main` ruleset, and none of `Test version-tag.yml`,
+`Test dependency-snapshot.yml` and `Release / Check the version` is a required check yet.
 
 ## 🩺 Troubleshooting
 
