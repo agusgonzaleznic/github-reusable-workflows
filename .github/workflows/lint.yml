@@ -54,6 +54,7 @@ jobs:
     permissions:
       contents: read
     with:
+      version-from-tags: true
       release-paths: .github/workflows/
 
   # On main, once the lint and the tests passed: tags the next version when a workflow
@@ -69,4 +70,5 @@ jobs:
       actions: write
       pull-requests: read
     with:
+      version-from-tags: true
       release-paths: .github/workflows/

@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
-"""A stand-in for `gh api`, driven by a JSON state file. It logs every call and applies --jq with
-the real jq, so the workflow's jq expressions are exercised too."""
+"""A stand-in for `gh api`, driven by a JSON state file, for test_version_tag.py. It logs every
+call and applies --jq with the real jq, so the workflow's jq expressions are exercised too.
+
+State keys: repo, tip, releases (tags with a GitHub release), runs_by_tag ({tag: [{id, status,
+conclusion}], newest first}), runs ({id: conclusion}), attempts ({id: n}), pr_labels ({sha: [names]
+or null for no pull request}), run_conclusion (of dispatched runs), rerun_conclusion, rerun_lag
+(reads of a re-run run that still show the old attempt), existing_refs, and error switches:
+release_api_error, runs_list_error, dispatch_error, dispatch_empty, rerun_error, pulls_error.
+Calls are recorded under created, dispatched and reruns.
+"""
 import json
 import os
 import subprocess
@@ -37,6 +45,11 @@ while i < len(args):
 repo = state["repo"]
 
 
+def save():
+    with open(state_path, "w") as fh:
+        json.dump(state, fh)
+
+
 def out(obj):
     text = json.dumps(obj)
     if jq_expr is not None:
@@ -53,11 +66,6 @@ def out(obj):
 def err(code, msg):
     sys.stderr.write(f"gh: {msg} (HTTP {code})\n")
     sys.exit(1)
-
-
-def save():
-    with open(state_path, "w") as fh:
-        json.dump(state, fh)
 
 
 prefix = f"repos/{repo}/"
@@ -79,26 +87,47 @@ if method == "GET" and rest.startswith("releases/tags/"):
 if method == "GET" and rest.startswith("actions/workflows/") and "/runs?" in rest:
     if state.get("runs_list_error"):
         err(500, "Server Error")
-    query = rest.split("?", 1)[1]
-    params = dict(p.split("=", 1) for p in query.split("&"))
-    out({"workflow_runs": state.get("active_runs", {}).get(params["branch"], [])})
+    params = dict(p.split("=", 1) for p in rest.split("?", 1)[1].split("&"))
+    out({"workflow_runs": state.get("runs_by_tag", {}).get(params["branch"], [])})
 
 if method == "POST" and rest.startswith("actions/workflows/") and rest.endswith("/dispatches"):
     if state.get("dispatch_error"):
         err(422, "Unprocessable Entity")
     run_id = 1000 + len(state.setdefault("dispatched", []))
+    conclusion = state.get("run_conclusion", "success")
     state["dispatched"].append({"ref": fields.get("ref"), "return_run_details": fields.get("return_run_details"), "run": run_id})
-    state.setdefault("runs", {})[str(run_id)] = state.get("run_conclusion", "success")
+    state.setdefault("runs", {})[str(run_id)] = conclusion
+    state.setdefault("runs_by_tag", {}).setdefault(fields.get("ref"), []).insert(
+        0, {"id": run_id, "status": "completed", "conclusion": conclusion})
     save()
     if state.get("dispatch_empty"):  # a 204 without a body, as without return_run_details
         sys.exit(0)
     out({"workflow_run_id": run_id, "run_url": f"https://api.github.com/{prefix}actions/runs/{run_id}",
          "html_url": f"https://github.com/{repo}/actions/runs/{run_id}"})
 
+if method == "POST" and rest.startswith("actions/runs/") and rest.endswith("/rerun-failed-jobs"):
+    if state.get("rerun_error"):
+        err(403, "This workflow run cannot be re-run")
+    run_id = rest[len("actions/runs/"):-len("/rerun-failed-jobs")]
+    state.setdefault("reruns", []).append(int(run_id))
+    state.setdefault("pending_reruns", {})[run_id] = state.get("rerun_lag", 0)
+    save()
+    sys.exit(0)  # 201 without a body
+
 if method == "GET" and rest.startswith("actions/runs/"):
     run_id = rest[len("actions/runs/"):]
+    attempts = state.setdefault("attempts", {})
+    pending = state.setdefault("pending_reruns", {})
+    if run_id in pending:
+        if pending[run_id] > 0:  # the new attempt has not shown up yet: the old one still reads
+            pending[run_id] -= 1
+        else:
+            del pending[run_id]
+            attempts[run_id] = attempts.get(run_id, 1) + 1
+            state.setdefault("runs", {})[run_id] = state.get("rerun_conclusion", "success")
+        save()
     conclusion = state.get("runs", {}).get(run_id, state.get("run_conclusion", "success"))
-    out({"status": "completed", "conclusion": conclusion})
+    out({"status": "completed", "conclusion": conclusion, "run_attempt": attempts.get(run_id, 1)})
 
 if method == "POST" and rest == "git/refs":
     ref = fields.get("ref", "")

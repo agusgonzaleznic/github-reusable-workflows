@@ -407,17 +407,32 @@ starts the caller's release workflow on that tag, waits for it and fails with it
 it says which version the merge releases and, with `version` set, fails a change that ships under a
 version that is already out.
 
-| `version` | For | On a pull request | On the default branch |
-|-----------|-----|-------------------|-----------------------|
-| Set, from the code (`__version__`, say) | A package whose files carry their version | A change under `release-paths` needs a version newer than every `vX.Y.Z` tag | A newer version is tagged and released. A change under `release-paths` with the version unchanged fails the run, because it would never ship |
-| Empty | A repository whose tags are its only version | A notice of the version the merge releases | When anything under `release-paths` changed since the newest tag: the next minor version, or the next major version when a pull request merged since that tag has the label `breaking`; `1.0.0` when there is no tag |
+The caller picks one of two ways to choose the version:
+
+| Input | For | On a pull request | On the default branch |
+|-------|-----|-------------------|-----------------------|
+| `version`, from the code (`__version__`, say) | A package whose files carry their version | A change under `release-paths` needs a version newer than every `vX.Y.Z` tag | A newer version is tagged and released. A change under `release-paths` with the version unchanged fails the run, because it would never ship |
+| `version-from-tags: true` | A repository whose tags are its only version | A notice of the version the merge releases | When anything under `release-paths` changed since the newest tag: the next minor version, or the next major version when a pull request merged since that tag has the label `breaking`; `1.0.0` when there is no tag |
+
+An empty `version` without `version-from-tags` fails, and so do both together, so a typo in the
+caller cannot fall through to the other way.
 
 Only the run of the default branch's current tip tags anything, so a re-run of an older commit
-passes with a notice. Each run there first finishes the newest tag's release when that tag has none
-yet: it waits for a release run that is still going, or starts one (a run stopped between the tag
-and the release). Versions compare as numbers (`1.10.0` is newer than `1.9.0`), and tags of any
-other shape, such as `v2` or `v3.0.0-rc1`, are ignored. A lookup that fails stops the run rather
-than guess.
+passes with a notice. A release is finished when a run of the release workflow on its tag succeeded
+(or, for a tag that no run ever released, when the tag has a GitHub release). A run there with
+nothing newer to release finishes the newest tag's release: it waits for a release run that is still
+going, re-runs the failed jobs of one that failed (the GitHub release may be out while an upload to
+PyPI failed), and starts the release when the tag has neither a run nor a GitHub release (a run
+stopped between the tag and the release). A newer version is tagged and released at once and
+replaces an unfinished release, so the fix for a release that cannot succeed can always ship.
+Versions compare as numbers (`1.10.0` is newer than `1.9.0`), and tags of any other shape, such as
+`v2` or `v3.0.0-rc1`, are ignored. A lookup that fails stops the run rather than guess.
+
+A run on the default branch waits up to 50 minutes for its release run, and the next merge's run
+queues behind it, because runs there never cancel each other. GitHub keeps one queued run per
+concurrency group: a newer merge replaces the queued run, which then shows as cancelled, and the
+newer run releases both changes. To retry a release, re-run the newest run on the default branch.
+A re-run of an older one releases nothing and can replace the queued run of the tip.
 
 The job tags with the caller's `GITHUB_TOKEN`, and GitHub starts no workflow for events that token
 causes except `workflow_dispatch`. So the release workflow lists `workflow_dispatch` among its
@@ -451,7 +466,7 @@ jobs:
     permissions:
       contents: read
     with:
-      version: ${{ needs.package.outputs.version }}  # Optional, default: '' (the next version from the tags)
+      version: ${{ needs.package.outputs.version }}  # or version-from-tags: true
       release-paths: |
         src/
         pyproject.toml
@@ -463,7 +478,7 @@ jobs:
     uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/version-tag.yml@<full-commit-sha>  # v1.9.0
     permissions:
       contents: write  # the tag
-      actions: write   # starts release.yml on it and watches the run
+      actions: write   # starts release.yml on it, watches the run and re-runs its failed jobs
     with:
       version: ${{ needs.package.outputs.version }}
       release-paths: |
@@ -471,28 +486,32 @@ jobs:
         pyproject.toml
 ```
 
-With `version` empty, the `release` job also needs `pull-requests: read`, for the labels.
+With `version-from-tags: true`, the `release` job also needs `pull-requests: read`, for the labels.
 
 **Inputs:**
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `version` | The version the commit ships, `X.Y.Z`; empty picks the next version from the tags | No | `''` |
+| `version` | The version the commit ships, `X.Y.Z`; required unless `version-from-tags` is true | No | `''` |
+| `version-from-tags` | Take the next version from the tags instead: the minor version up, the major version with the label `breaking` | No | `false` |
 | `release-paths` | Paths that ship, one per line: a path ending in `/` covers everything under it, any other path one file | Yes | |
 | `release-workflow` | File name of the workflow, in `.github/workflows`, started on a new tag; it needs `workflow_dispatch` | No | `'release.yml'` |
 | `runs-on` | Runner label | No | `'ubuntu-latest'` |
 
-**Outputs:** `tag`, the tag whose release the run started or waited for; empty when there was none.
+**Outputs:** `tag`, the tag whose release the run started, re-ran or waited for; empty when there
+was none.
 
 **Permissions:** the job declares none and runs with what the caller grants, because a pull request
 and the default branch need different ones: `contents: read` on a pull request, and `contents: write`
-(the tag) with `actions: write` (the release run) on the default branch.
+(the tag) with `actions: write` (the release run) on the default branch, plus `pull-requests: read`
+with `version-from-tags`.
 
 **Required checks:** require `Release / Check the version`, so a change that ships cannot merge under
 a version that is already out.
 
-This repository releases itself this way: `lint.yml` tags the next minor version when a merge
-changes a workflow, the label `breaking` makes it a major version, and `release.yml` publishes it.
+This repository releases itself this way, with `version-from-tags: true`: `lint.yml` tags the next
+minor version when a merge changes a workflow, the label `breaking` makes it a major version, and
+`release.yml` publishes it.
 `tests/version-tag/test_version_tag.py` runs the script through every case above against throwaway
 git repositories and a stand-in for `gh`, on every pull request and before each release.
 
