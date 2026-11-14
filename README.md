@@ -340,9 +340,10 @@ line, so only the owner's account should edit it.
 
 ### 7. GitHub Release (`github-release.yml`)
 
-Publishes the GitHub release of the version tag that started the calling workflow, from the trunk
+Publishes the GitHub release of the version tag the calling workflow runs on, from the trunk
 only: it fails on anything but a tag `vX.Y.Z`, on a tag that no longer names the commit the run
-started from, and on a tag whose commit is not on the default branch. The notes are generated from
+started from, and on a tag whose commit is not on the default branch. With section 8 the merge makes
+the tag and starts the release on it, so nobody pushes a tag by hand. The notes are generated from
 the pull requests merged since the previous release. With `artifact-name` set, the files of that
 artifact are attached with a `SHA256SUMS` file for them; gh keeps the release a draft until every
 file is uploaded and deletes the draft when an upload fails.
@@ -356,6 +357,7 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:  # how version-tag.yml (section 8) starts it on the tag it made
 
 permissions: {}
 
@@ -392,7 +394,107 @@ jobs:
 **Check a download:** in the folder that holds the downloaded files, `sha256sum -c SHA256SUMS`
 (`shasum -a 256 -c SHA256SUMS` on macOS).
 
-This repository's own `release.yml` calls it on every version tag, from the tagged commit.
+This repository's own `release.yml` calls it for every version tag, from the tagged commit, and
+`lint.yml` makes the tags (section 8).
+
+---
+
+### 8. Version Tag (`version-tag.yml`)
+
+Makes the merge to the default branch the release, so nobody pushes a tag or publishes a release by
+hand. On a push to the default branch it tags the commit `vX.Y.Z` when something that ships changed,
+starts the caller's release workflow on that tag, waits for it and fails with it. On a pull request
+it says which version the merge releases and, with `version` set, fails a change that ships under a
+version that is already out.
+
+| `version` | For | On a pull request | On the default branch |
+|-----------|-----|-------------------|-----------------------|
+| Set, from the code (`__version__`, say) | A package whose files carry their version | A change under `release-paths` needs a version newer than every `vX.Y.Z` tag | A newer version is tagged and released. A change under `release-paths` with the version unchanged fails the run, because it would never ship |
+| Empty | A repository whose tags are its only version | A notice of the version the merge releases | When anything under `release-paths` changed since the newest tag: the next minor version, or the next major version when a pull request merged since that tag has the label `breaking`; `1.0.0` when there is no tag |
+
+Only the run of the default branch's current tip tags anything, so a re-run of an older commit
+passes with a notice. Each run there first finishes the newest tag's release when that tag has none
+yet: it waits for a release run that is still going, or starts one (a run stopped between the tag
+and the release). Versions compare as numbers (`1.10.0` is newer than `1.9.0`), and tags of any
+other shape, such as `v2` or `v3.0.0-rc1`, are ignored. A lookup that fails stops the run rather
+than guess.
+
+The job tags with the caller's `GITHUB_TOKEN`, and GitHub starts no workflow for events that token
+causes except `workflow_dispatch`. So the release workflow lists `workflow_dispatch` among its
+triggers (see section 7): it runs with `github.ref` set to the tag, as for a pushed tag. A tag
+ruleset that blocks updates and deletions of `v*` fits; tag creation must stay open to the workflow.
+
+**Usage** (in the CI workflow, with the build from section 3):
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Runs on main never cancel a running one: it may be waiting for its release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # tests and package jobs here; package has the output version
+
+  check-version:
+    name: Release  # its check: "Release / Check the version"
+    if: github.event_name == 'pull_request'
+    needs: package
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/version-tag.yml@<full-commit-sha>  # v1.9.0
+    permissions:
+      contents: read
+    with:
+      version: ${{ needs.package.outputs.version }}  # Optional, default: '' (the next version from the tags)
+      release-paths: |
+        src/
+        pyproject.toml
+
+  release:
+    name: Release  # its check: "Release / Tag the version"
+    if: github.event_name == 'push'
+    needs: [tests, package]
+    uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/version-tag.yml@<full-commit-sha>  # v1.9.0
+    permissions:
+      contents: write  # the tag
+      actions: write   # starts release.yml on it and watches the run
+    with:
+      version: ${{ needs.package.outputs.version }}
+      release-paths: |
+        src/
+        pyproject.toml
+```
+
+With `version` empty, the `release` job also needs `pull-requests: read`, for the labels.
+
+**Inputs:**
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `version` | The version the commit ships, `X.Y.Z`; empty picks the next version from the tags | No | `''` |
+| `release-paths` | Paths that ship, one per line: a path ending in `/` covers everything under it, any other path one file | Yes | |
+| `release-workflow` | File name of the workflow, in `.github/workflows`, started on a new tag; it needs `workflow_dispatch` | No | `'release.yml'` |
+| `runs-on` | Runner label | No | `'ubuntu-latest'` |
+
+**Outputs:** `tag`, the tag whose release the run started or waited for; empty when there was none.
+
+**Permissions:** the job declares none and runs with what the caller grants, because a pull request
+and the default branch need different ones: `contents: read` on a pull request, and `contents: write`
+(the tag) with `actions: write` (the release run) on the default branch.
+
+**Required checks:** require `Release / Check the version`, so a change that ships cannot merge under
+a version that is already out.
+
+This repository releases itself this way: `lint.yml` tags the next minor version when a merge
+changes a workflow, the label `breaking` makes it a major version, and `release.yml` publishes it.
+`tests/version-tag/test_version_tag.py` runs the script through every case above against throwaway
+git repositories and a stand-in for `gh`, on every pull request and before each release.
 
 ---
 
@@ -403,13 +505,13 @@ This repository's own `release.yml` calls it on every version tag, from the tagg
 - Both Vite workflows are framework-agnostic and can work with any Vite-based project
 - **Security**: pin the reusable workflow to a full commit SHA, never `@main` (see [Supply chain hardening](#supply-chain-hardening))
 - **Important**: Use relative paths without `./` prefix for `artifact-path` (e.g., `'dist'` not `'./dist'`) to ensure proper artifact upload with GitHub Actions
-- **Reusable Workflow Pattern**: The reusable workflows do NOT define their own `concurrency` groups — those must be defined in the calling workflow to avoid deadlock conflicts. They DO declare minimal least-privilege `permissions` per job; the caller must grant at least those scopes.
+- **Reusable Workflow Pattern**: The reusable workflows do NOT define their own `concurrency` groups; those must be defined in the calling workflow to avoid deadlock conflicts. They DO declare minimal least-privilege `permissions` per job, and the caller must grant at least those scopes. The exception is `version-tag.yml`, which declares none and runs with what the caller grants (see section 8).
 
 ## Supply chain hardening
 
 These workflows follow GitHub Actions supply-chain best practices:
 
-- **All actions are pinned to full commit SHAs** (with the version in a comment), not mutable tags. A mutable tag such as `@v6` can be silently repointed by anyone who compromises the action's repository — as happened in the `tj-actions/changed-files` incident (March 2025). A commit SHA is immutable.
+- **All actions are pinned to full commit SHAs** (with the version in a comment), not mutable tags. A mutable tag such as `@v6` can be silently repointed by anyone who compromises the action's repository, as happened in the `tj-actions/changed-files` incident (March 2025). A commit SHA is immutable.
 - **Least-privilege `GITHUB_TOKEN`**: each job declares the minimum `permissions` it needs (`contents: read` to build; `pages: write` + `id-token: write` only on the deploy job).
 - **`persist-credentials: false`** on checkout so the token is not written to `.git/config`, where a malicious dependency in a later step could read it.
 - **Data inputs are passed via `env:` and quoted**: values used as *data* in `run:` blocks (e.g. `artifact-path`) go through `env:` rather than being interpolated directly, removing that shell-injection class.
@@ -417,28 +519,28 @@ These workflows follow GitHub Actions supply-chain best practices:
 
 ### Caller responsibilities
 
-The `install-command`, `lint-command`, and `build-command` inputs are **executed as shell commands** (`run: ${{ inputs.*-command }}`) — that is their purpose. They cannot be `env:`-quoted without breaking that contract. **Do not wire untrusted or event-derived data** (e.g. a PR title, branch name, or `github.event.*`) into these inputs, or into the calling workflow that forwards them — doing so is command injection inside the reusable workflow. Pass only static, trusted command strings. The same holds for `prepare-command`,
+The `install-command`, `lint-command`, and `build-command` inputs are **executed as shell commands** (`run: ${{ inputs.*-command }}`); that is their purpose. They cannot be `env:`-quoted without breaking that contract. **Do not wire untrusted or event-derived data** (e.g. a PR title, branch name, or `github.event.*`) into these inputs, or into the calling workflow that forwards them. Doing so is command injection inside the reusable workflow. Pass only static, trusted command strings. The same holds for `prepare-command`,
 `extra-pin-command` (actions-lint.yml) and `test-command` (python-tests.yml).
 
-The `build-env-vars` secret is appended verbatim to `$GITHUB_ENV` and is available to every later step (including dependency build code). GitHub masks the exact full secret string in logs, but **not** each individual `KEY=value` line within a multiline secret — avoid `echo`-ing those values in your build.
+The `build-env-vars` secret is appended verbatim to `$GITHUB_ENV` and is available to every later step (including dependency build code). GitHub masks the exact full secret string in logs, but **not** each individual `KEY=value` line within a multiline secret, so avoid `echo`-ing those values in your build.
 
 ### Maintainer controls (root of trust)
 
 Consumers pin to commit SHAs of *this* repository, so this repo's integrity is the root of their trust. Pair SHA pinning with:
 
 - **Branch protection** on `main`: require a PR, a CODEOWNER approval (see `.github/CODEOWNERS`), and passing status checks before merge.
-- **Tag protection** (or immutable releases) so a published version tag can't be silently repointed.
+- **Tag protection** (or immutable releases) so a published version tag can't be silently repointed. Only the merge makes a tag here (section 8), never a person.
 - Reviewing Dependabot PRs before merge rather than auto-merging.
 
 ### Consumers must pin this repo too
 
-Pinning the actions *inside* these workflows only protects half the chain. Any workflow that *calls* these reusable workflows must itself pin to a **full commit SHA** of this repository — referencing `@main` means a compromise of this repo would immediately execute in the caller with the caller's secrets.
+Pinning the actions *inside* these workflows only protects half the chain. Any workflow that *calls* these reusable workflows must itself pin to a **full commit SHA** of this repository. Referencing `@main` means a compromise of this repo would immediately execute in the caller with the caller's secrets.
 
 ```yaml
-# ❌ Not safe — tracks a mutable branch
+# ❌ Not safe: tracks a mutable branch
 uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@main
 
-# ✅ Safe — immutable commit, human-readable version in the comment
+# ✅ Safe: immutable commit, human-readable version in the comment
 uses: agusgonzaleznic/github-reusable-workflows/.github/workflows/vite-ci.yml@<full-commit-sha>  # v1.0.0
 ```
 
@@ -505,3 +607,4 @@ When adding new reusable workflows, ensure:
 4. Include usage examples in this README
 5. Never rename a job: its name is half of every caller's required checks (`<calling job> / <job>`)
 6. Leave `concurrency` to the caller; a reusable workflow that sets it can deadlock (see Troubleshooting)
+7. Never push a tag or publish a release by hand: the merge of a pull request that changes a workflow releases the next minor version, and the label `breaking` on it makes the next major version (section 8)

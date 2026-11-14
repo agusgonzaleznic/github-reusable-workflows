@@ -6,6 +6,10 @@ name: Lint workflows
 # invalid syntax and expressions (a `secrets` reference in a step-level `if:` once
 # shipped here and failed every caller), and the pin check proves each action SHA is
 # the commit its version comment claims.
+#
+# It also releases: a merge to main that changes a workflow is tagged with the next
+# version by version-tag.yml, which then runs release.yml on the tag. The label
+# "breaking" on the pull request makes it the next major version.
 on:
   pull_request:
   push:
@@ -14,9 +18,11 @@ on:
 permissions:
   contents: read
 
+# A pull request cancels its older runs. Runs on main never cancel a running one: it
+# may be tagging a version and waiting for its release.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # "Lint" is half of this repository's required checks ("Lint / actionlint" and
@@ -24,3 +30,43 @@ jobs:
   lint:
     name: Lint
     uses: ./.github/workflows/actions-lint.yml
+
+  # The scenarios of version-tag.yml's script, run against throwaway git repositories
+  # and a stand-in for gh: nothing here talks to GitHub.
+  test:
+    name: Test version-tag.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the scenarios
+        run: python3 -I tests/version-tag/test_version_tag.py
+
+  # On a pull request: which version the merge releases ("Release / Check the version").
+  check-version:
+    name: Release
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/version-tag.yml
+    permissions:
+      contents: read
+    with:
+      release-paths: .github/workflows/
+
+  # On main, once the lint and the tests passed: tags the next version when a workflow
+  # changed since the newest tag, runs release.yml on it and waits for it ("Release / Tag
+  # the version").
+  release:
+    name: Release
+    if: github.event_name == 'push'
+    needs: [lint, test]
+    uses: ./.github/workflows/version-tag.yml
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: read
+    with:
+      release-paths: .github/workflows/

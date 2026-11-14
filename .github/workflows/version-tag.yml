@@ -1,0 +1,328 @@
+name: Version Tag
+
+# Makes the merge to main the release, so nobody pushes a tag or publishes a release by hand. On a
+# push to the default branch it tags the commit with a new version vX.Y.Z, starts the caller's
+# release workflow on that tag, waits for it and fails with it. On a pull request it says what the
+# merge will release, and with a version set it fails a change that ships under a version that is
+# already out.
+#
+# Two ways to choose the version:
+#
+# - version set: for a package whose files carry their version (Python's __version__, say). The
+#   pull request raises it. A pull request that changes a release path needs a version newer than
+#   every vX.Y.Z tag. On main a newer version is tagged and released, and main fails when a release
+#   path changed since the newest tag while the version stayed, because that change would never
+#   ship.
+# - version empty: for a repository whose tags are its only version. On main, when a release path
+#   changed since the newest tag, the next version is tagged: the minor version up, or the major
+#   version up when a pull request merged since that tag has the label "breaking"; 1.0.0 when there
+#   is no tag yet.
+#
+# Only the run of the trunk's current tip tags anything. A re-run of an older commit passes with a
+# notice, and the tip's run releases what it carries. Each run on the trunk first finishes the
+# newest tag's release when that tag has no release yet: it waits for a release run that is still
+# going, or starts one when none is (a run stopped between tagging and starting the release).
+#
+# The tag is a lightweight tag made with the caller's token. GitHub starts no workflow for events
+# that token causes, except workflow_dispatch, so the release workflow is started with
+# workflow_dispatch on the tag: it runs with github.ref set to the tag, as for a pushed tag, and
+# needs workflow_dispatch among its triggers.
+#
+# Permissions: the job declares none and runs with what the caller grants, because a pull request
+# and the trunk need different ones. On a pull request, contents: read: the labels come from the
+# event. On the trunk, contents: write (the tag), actions: write (to start and watch the release)
+# and, with the version empty, pull-requests: read (the labels of the merged pull requests).
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'The version the commit ships, X.Y.Z; empty picks the next version from the tags'
+        required: false
+        type: string
+        default: ''
+      release-paths:
+        description: 'Paths that ship, one per line: a path ending in / covers everything under it, any other path one file'
+        required: true
+        type: string
+      release-workflow:
+        description: 'File name of the workflow, in .github/workflows, started on a new tag'
+        required: false
+        type: string
+        default: 'release.yml'
+      runs-on:
+        description: 'Runner label for the job'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    outputs:
+      tag:
+        description: 'The tag whose release this run started or waited for; empty when there was none'
+        value: ${{ jobs.version.outputs.tag }}
+
+jobs:
+  # The job name is half of the callers' check names ("Release / Check the version" on a pull
+  # request): renaming it is a breaking change.
+  version:
+    name: ${{ github.event_name == 'pull_request' && 'Check the version' || 'Tag the version' }}
+    runs-on: ${{ inputs.runs-on }}
+    # Up to 50 minutes of it is the wait for the release run.
+    timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      # The full history and every tag, for git diff and the tag list. The job runs no file from
+      # the checkout.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check or tag the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          TRUNK: ${{ github.event.repository.default_branch }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          VERSION: ${{ inputs.version }}
+          RELEASE_PATHS: ${{ inputs.release-paths }}
+          RELEASE_WORKFLOW: ${{ inputs.release-workflow }}
+        run: |
+          set -euo pipefail
+          shopt -s inherit_errexit
+
+          fail() { echo "::error::$*"; exit 1; }
+          note() { echo "$*"; echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          is_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
+
+          # newer A B: succeeds when version A is newer than version B (numbers, not text).
+          newer() {
+            local -a a b
+            local i
+            IFS=. read -r -a a <<<"$1"
+            IFS=. read -r -a b <<<"$2"
+            for i in 0 1 2; do
+              if [ "${a[i]}" -gt "${b[i]}" ]; then return 0; fi
+              if [ "${a[i]}" -lt "${b[i]}" ]; then return 1; fi
+            done
+            return 1
+          }
+
+          # The newest vX.Y.Z tag without its v, empty when there is none. Tags of any other
+          # shape are left out.
+          newest_tag() {
+            local best='' t v
+            while IFS= read -r t; do
+              v=${t#v}
+              if ! is_version "$v"; then continue; fi
+              if [ -z "$best" ] || newer "$v" "$best"; then best=$v; fi
+            done < <(git tag --list 'v*')
+            printf '%s\n' "$best"
+          }
+
+          # The next version after NEWEST: the major version up when BREAKING is yes, else the
+          # minor version up; 1.0.0 when there is no tag yet.
+          next_version() {
+            local major minor patch
+            if [ -z "$1" ]; then echo 1.0.0; return; fi
+            IFS=. read -r major minor patch <<<"$1"
+            : "$patch"
+            if [ "$2" = yes ]; then echo "$((major + 1)).0.0"; else echo "$major.$((minor + 1)).0"; fi
+          }
+
+          # The release paths: relative, inside the repository, at least one.
+          paths=()
+          while IFS= read -r p; do
+            p=${p#"${p%%[![:space:]]*}"}
+            p=${p%"${p##*[![:space:]]}"}
+            if [ -z "$p" ]; then continue; fi
+            case "/$p/" in
+              //* | */../*) fail "The release path '$p' must be relative and stay inside the repository" ;;
+            esac
+            paths+=("$p")
+          done <<<"$RELEASE_PATHS"
+          if [ "${#paths[@]}" -eq 0 ]; then fail "release-paths names no path"; fi
+
+          # The changed files of a git diff range, a rename counted as a deletion and an addition.
+          changed() { git diff -z --name-only --no-renames "$@" | tr '\0' '\n'; }
+
+          # Of the file names on stdin, prints those under a release path.
+          shipping() {
+            local f p
+            while IFS= read -r f; do
+              for p in "${paths[@]}"; do
+                if [[ $p == */ && $f == "$p"* ]] || [[ $f == "$p" ]]; then
+                  printf '%s\n' "$f"
+                  break
+                fi
+              done
+            done
+          }
+
+          # A short list for messages: the first five names, then a count.
+          brief() {
+            local n
+            n=$(grep -c . <<<"$1" || true)
+            if [ "$n" -le 5 ]; then paste -sd, - <<<"$1" | sed 's/,/, /g'; else echo "$(head -n 5 <<<"$1" | paste -sd, - | sed 's/,/, /g') and $((n - 5)) more"; fi
+          }
+
+          # Succeeds when the tag has a published GitHub release, fails when it has none, and
+          # stops the job on any other answer.
+          has_release() {
+            local out
+            if out=$(gh api "repos/$REPO/releases/tags/$1" --jq .tag_name 2>&1); then return 0; fi
+            if [[ $out == *"HTTP 404"* ]]; then return 1; fi
+            fail "Cannot tell whether $1 has a release: $out"
+          }
+
+          # The id of a queued or running release run for the tag, empty when there is none. It
+          # runs inside $(...), so the caller reports a failure: a message printed in here would
+          # end up in the variable.
+          active_release_run() {
+            gh api "repos/$REPO/actions/workflows/$RELEASE_WORKFLOW/runs?branch=$1&per_page=100" \
+              --jq '[.workflow_runs[] | select(.status != "completed")] | first | .id // empty'
+          }
+
+          # Waits up to 50 minutes for a run to finish, and fails unless it succeeded.
+          watch() {
+            local run=$1 tag=$2 url state status conclusion deadline=$((SECONDS + 3000))
+            url="https://github.com/$REPO/actions/runs/$run"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            while :; do
+              state=$(gh api "repos/$REPO/actions/runs/$run" --jq '[.status, (.conclusion // "")] | join(" ")') || state='unknown '
+              status=${state%% *}
+              conclusion=${state#* }
+              if [ "$status" = completed ]; then break; fi
+              if [ "$SECONDS" -ge "$deadline" ]; then fail "The release run of $tag is still '$status' after 50 minutes: $url"; fi
+              sleep 20
+            done
+            if [ "$conclusion" != success ]; then fail "The release run of $tag ended '$conclusion': $url"; fi
+            note "Released $tag: $url"
+          }
+
+          # Starts the release workflow on the tag, then watches its run.
+          release() {
+            local out run
+            out=$(gh api --method POST "repos/$REPO/actions/workflows/$RELEASE_WORKFLOW/dispatches" \
+              -f ref="$1" -F return_run_details=true 2>&1) || fail "Could not start $RELEASE_WORKFLOW on $1: $out"
+            run=$(jq -r '.workflow_run_id // empty' <<<"$out" 2>/dev/null || true)
+            if ! [[ $run =~ ^[0-9]+$ ]]; then fail "Started $RELEASE_WORKFLOW on $1, but the answer names no run: $out"; fi
+            note "Started $RELEASE_WORKFLOW on $1: https://github.com/$REPO/actions/runs/$run"
+            watch "$run" "$1"
+          }
+
+          # Tags this commit, through the API: the tag can never move or be deleted afterwards.
+          create_tag() {
+            local out
+            out=$(gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$1" -f sha="$SHA" 2>&1) \
+              || fail "Could not create the tag $1 on $SHA: $out"
+            note "Tagged $1 on $SHA"
+          }
+
+          # Succeeds when a pull request merged since the tag, up to this commit, has the label
+          # "breaking". Fails closed: a lookup that errors stops the job.
+          breaking_since() {
+            local c labels
+            while IFS= read -r c; do
+              labels=$(gh api "repos/$REPO/commits/$c/pulls" --jq '[.[].labels[].name] | join(",")') \
+                || fail "Cannot read the pull requests of $c"
+              if [[ ",$labels," == *,breaking,* ]]; then return 0; fi
+            done < <(git rev-list "$1..$SHA")
+            return 1
+          }
+
+          if [ -n "$VERSION" ] && ! is_version "$VERSION"; then
+            fail "The version '$VERSION' is not X.Y.Z (no leading zeros, no suffix)"
+          fi
+          newest=$(newest_tag)
+
+          case "$EVENT" in
+            pull_request)
+              if ! [[ $PR_BASE =~ ^[0-9a-f]{40}$ && $PR_HEAD =~ ^[0-9a-f]{40}$ ]]; then
+                fail "The pull_request event names no base and head commits"
+              fi
+              shipped=$(changed "$PR_BASE...$PR_HEAD" | shipping)
+              if [ -z "$shipped" ]; then
+                note "Nothing that ships changes here, so this pull request needs no new version."
+                exit 0
+              fi
+              if [ -n "$VERSION" ]; then
+                if [ -n "$newest" ] && ! newer "$VERSION" "$newest"; then
+                  fail "This pull request changes files that ship ($(brief "$shipped")), but the version is $VERSION and v$newest is already out. Raise the version."
+                fi
+                next=$VERSION
+              else
+                breaking=no
+                if jq -e 'index("breaking")' <<<"$PR_LABELS" >/dev/null; then breaking=yes; fi
+                next=$(next_version "$newest" "$breaking")
+              fi
+              note "The merge releases v$next: $(brief "$shipped") changed."
+              ;;
+
+            push)
+              if [ -z "$TRUNK" ] || [ "$REF" != "refs/heads/$TRUNK" ]; then
+                fail "Tags are made only from a push to the default branch, not $REF"
+              fi
+              if ! [[ $RELEASE_WORKFLOW =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
+                fail "release-workflow '$RELEASE_WORKFLOW' is not a workflow file name"
+              fi
+              tip=$(gh api "repos/$REPO/git/ref/heads/$TRUNK" --jq .object.sha) || fail "Cannot read the tip of $TRUNK"
+              if [ "$tip" != "$SHA" ]; then
+                note "$TRUNK has moved on to $tip, and that commit's run releases. Nothing to do here."
+                exit 0
+              fi
+
+              # Finish the newest tag's release first, when it has none.
+              if [ -n "$newest" ] && ! has_release "v$newest"; then
+                run=$(active_release_run "v$newest") || fail "Cannot list the runs of $RELEASE_WORKFLOW for v$newest"
+                if [ -n "$run" ]; then
+                  note "v$newest has no release yet and its release run is still going: waiting for it."
+                  watch "$run" "v$newest"
+                else
+                  note "v$newest has a tag but no release: starting its release again."
+                  release "v$newest"
+                fi
+              fi
+
+              if [ -n "$VERSION" ]; then
+                if [ -z "$newest" ] || newer "$VERSION" "$newest"; then
+                  create_tag "v$VERSION"
+                  release "v$VERSION"
+                  exit 0
+                fi
+                if [ "$VERSION" != "$newest" ]; then
+                  fail "The version $VERSION is older than the newest release, v$newest"
+                fi
+                shipped=$(changed "v$newest" "$SHA" | shipping)
+                if [ -n "$shipped" ]; then
+                  fail "Files that ship changed since v$newest ($(brief "$shipped")), but the version is still $VERSION, so nothing was released. Raise the version in a pull request."
+                fi
+                note "Nothing to release: v$newest is out, and nothing that ships changed since."
+              else
+                if [ -n "$newest" ]; then
+                  shipped=$(changed "v$newest" "$SHA" | shipping)
+                  if [ -z "$shipped" ]; then
+                    note "Nothing that ships changed since v$newest, so there is nothing to release."
+                    exit 0
+                  fi
+                fi
+                breaking=no
+                if [ -n "$newest" ] && breaking_since "v$newest"; then breaking=yes; fi
+                next=$(next_version "$newest" "$breaking")
+                create_tag "v$next"
+                release "v$next"
+              fi
+              ;;
+
+            *)
+              fail "Runs on pull_request and push events only, not $EVENT"
+              ;;
+          esac

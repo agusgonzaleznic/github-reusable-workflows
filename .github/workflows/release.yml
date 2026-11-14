@@ -1,17 +1,22 @@
 name: Release
 
-# Publishes the GitHub release of each version tag pushed to this repository, with the shared
-# github-release.yml from the tagged commit itself, so every release runs the workflow it ships.
-# The notes are generated from the pull requests merged since the previous release.
+# Publishes the GitHub release of each version tag, with the shared github-release.yml from the
+# tagged commit itself, so every release runs the workflow it ships. The notes are generated from
+# the pull requests merged since the previous release.
+#
+# lint.yml makes the tags: on a merge to main that changes a workflow, version-tag.yml tags the
+# next version and starts this workflow on the tag with workflow_dispatch, because GitHub starts
+# no workflow for a tag its own token pushes.
 on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
 
 permissions: {}
 
-# One release at a time: a tag pushed while a release runs waits for it. GitHub keeps only the
-# newest waiting run of a group and cancels an older one, so push one tag at a time.
+# One release at a time. GitHub keeps only the newest waiting run of a group and cancels an older
+# one; version-tag.yml starts one release and waits for it before the next.
 concurrency:
   group: release
   cancel-in-progress: false
