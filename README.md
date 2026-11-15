@@ -419,15 +419,16 @@ Callers pin to commit SHAs of this repository, so its integrity is the root of t
 - **Pin this repository too.** Pinning the actions inside these workflows protects half the chain: a
   caller on `@main` runs a compromise here at once, with its own secrets.
 
-**How this repository is protected, as of 14 November 2026** (read from its rulesets)
+**How this repository is protected, as of 15 November 2026** (read from its rulesets)
 
 - **`main`:** no deletion or force push, linear history, signed commits, a pull request with one
-  approval and a code owner review (`.github/CODEOWNERS`), and the checks `Lint / actionlint` and
-  `Lint / Verify action pins` on an up-to-date branch.
+  approval and a code owner review (`.github/CODEOWNERS`), and the checks `Lint / actionlint`,
+  `Lint / Verify action pins`, `Test version-tag.yml` and `Test dependency-snapshot.yml` on an
+  up-to-date branch.
 - **`Protect version tags (v*)`:** no deletion, no update, no force push, and no bypass actor.
 
-Four gaps remain: a repository admin can bypass the `main` ruleset, and none of `Test version-tag.yml`,
-`Test dependency-snapshot.yml` and `Release / Check the version` is a required check yet.
+Two gaps remain: a repository admin can bypass the `main` ruleset, and `Release / Check the version`
+is not a required check yet.
 
 ## 🩺 Troubleshooting
 
