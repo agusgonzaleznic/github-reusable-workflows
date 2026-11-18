@@ -186,7 +186,9 @@ library sets `install-requirements: false`, and the venv stays empty. A ruleset 
 
 Call it from a job named `Tests` (its checks are `Tests / Python 3.12` and `Tests / Python 3.13`)
 with `requirements: requirements/lock.txt requirements/test.txt`, and optionally `apt-packages`
-(`ghostscript`, say) and `pythonpath` (`src`, say).
+(`ghostscript`, say) and `pythonpath` (`src`, say). On a macOS runner, `brew-packages` installs
+Homebrew formulae (`ffmpeg dvdauthor`, say); on any other runner it fails the job.
+`timeout-minutes` sets each test job's limit (15 by default).
 
 ### Dependency Snapshot
 
