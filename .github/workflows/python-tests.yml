@@ -28,6 +28,16 @@ on:
         required: false
         type: string
         default: ''
+      brew-packages:
+        description: 'Space-separated Homebrew formulae the tests need; macOS runners only'
+        required: false
+        type: string
+        default: ''
+      timeout-minutes:
+        description: 'Time limit of each test job, in minutes'
+        required: false
+        type: number
+        default: 15
       pythonpath:
         description: 'PYTHONPATH for the test command, for example src'
         required: false
@@ -54,7 +64,7 @@ jobs:
   test:
     name: Python ${{ matrix.python }}
     runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +90,30 @@ jobs:
           read -r -a packages <<<"$APT_PACKAGES"
           sudo timeout 300 apt-get update
           sudo timeout 300 apt-get install -y --no-install-recommends "${packages[@]}"
+
+      # Each name must look like a formula, so the input cannot pass options to brew. The job's
+      # timeout-minutes bounds the install: macOS has no timeout command.
+      - name: Install Homebrew packages
+        if: inputs.brew-packages != ''
+        env:
+          BREW_PACKAGES: ${{ inputs.brew-packages }}
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" != macOS ]; then
+            echo "FAIL brew-packages needs a macOS runner (runs-on: macos-15, say), not $RUNNER_OS"
+            exit 1
+          fi
+          read -r -a packages <<<"$BREW_PACKAGES"
+          for p in "${packages[@]}"; do
+            if ! [[ "$p" =~ ^[a-z0-9][a-z0-9@+._/-]*$ ]]; then
+              echo "FAIL not a formula name: $p"
+              exit 1
+            fi
+          done
+          brew install "${packages[@]}"
+          for p in "${packages[@]}"; do brew list --versions "$p"; done
 
       - name: Create the venv and install the hash-locked requirements
         env:
